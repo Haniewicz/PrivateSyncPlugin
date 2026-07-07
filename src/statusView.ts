@@ -1,0 +1,106 @@
+import { ItemView, WorkspaceLeaf } from "obsidian";
+import type PrivateSyncPlugin from "./plugin";
+
+export const PRIVATE_SYNC_VIEW = "private-sync-view";
+
+type Tab = "status" | "devices" | "conflicts" | "history";
+
+export class PrivateSyncView extends ItemView {
+  private activeTab: Tab = "status";
+
+  constructor(leaf: WorkspaceLeaf, private readonly plugin: PrivateSyncPlugin) {
+    super(leaf);
+  }
+
+  getViewType(): string {
+    return PRIVATE_SYNC_VIEW;
+  }
+
+  getDisplayText(): string {
+    return "Private Sync";
+  }
+
+  async onOpen(): Promise<void> {
+    this.render();
+  }
+
+  refresh(): void {
+    this.render();
+  }
+
+  private render(): void {
+    const root = this.containerEl.children[1];
+    root.empty();
+    root.addClass("private-sync-view");
+
+    const toolbar = root.createDiv({ cls: "private-sync-toolbar" });
+    toolbar.createEl("button", { text: "Sync now" }).onclick = () => this.plugin.syncEngine.syncNow();
+    toolbar.createEl("button", { text: "Pair" }).onclick = () => this.plugin.syncEngine.pairDevice();
+
+    const tabs = root.createDiv({ cls: "private-sync-tabs" });
+    for (const tab of ["status", "devices", "conflicts", "history"] as Tab[]) {
+      const button = tabs.createEl("button", { text: label(tab), cls: "private-sync-tab" });
+      if (tab === this.activeTab) button.addClass("is-active");
+      button.onclick = () => {
+        this.activeTab = tab;
+        this.render();
+      };
+    }
+
+    if (this.activeTab === "status") this.renderStatus(root);
+    if (this.activeTab === "devices") this.renderRemoteList(root, "devices");
+    if (this.activeTab === "conflicts") this.renderConflicts(root);
+    if (this.activeTab === "history") this.renderHistory(root);
+  }
+
+  private renderStatus(root: Element): void {
+    const index = this.plugin.indexStore.get();
+    const files = Object.values(index.files);
+    const list = root.createDiv({ cls: "private-sync-list" });
+    this.row(list, "Server", this.plugin.settings.serverUrl);
+    this.row(list, "Device", this.plugin.settings.deviceId ? this.plugin.settings.deviceName : "not paired");
+    this.row(list, "Last applied revision", String(index.lastAppliedRevision));
+    this.row(list, "Indexed files", String(files.length));
+    this.row(list, "Pending operations", String(index.queue.length));
+    for (const status of ["synced", "pending_upload", "conflict", "locked_by_request", "failed"]) {
+      this.row(list, status, String(files.filter((file) => file.status === status).length));
+    }
+  }
+
+  private renderRemoteList(root: Element, kind: "devices"): void {
+    const list = root.createDiv({ cls: "private-sync-list" });
+    this.plugin.api
+      .devices()
+      .then((response) => {
+        list.empty();
+        for (const device of response.devices) this.row(list, "Device", JSON.stringify(device));
+      })
+      .catch((error) => this.row(list, "Error", error.message));
+    this.row(list, "Loading", kind);
+  }
+
+  private renderConflicts(root: Element): void {
+    const list = root.createDiv({ cls: "private-sync-list" });
+    const conflicts = Object.values(this.plugin.indexStore.get().files).filter((file) => file.status === "conflict" || file.status === "locked_by_request");
+    if (conflicts.length === 0) {
+      this.row(list, "Status", "no local conflicts");
+      return;
+    }
+    for (const conflict of conflicts) this.row(list, conflict.path, conflict.status);
+  }
+
+  private renderHistory(root: Element): void {
+    const list = root.createDiv({ cls: "private-sync-list" });
+    this.row(list, "History", "select file history API is ready on the server; file picker UI is next");
+  }
+
+  private row(parent: Element, name: string, value: string): void {
+    const row = parent.createDiv({ cls: "private-sync-row" });
+    row.createDiv({ text: name });
+    row.createDiv({ text: value, cls: "private-sync-muted" });
+  }
+}
+
+function label(tab: Tab): string {
+  return tab.slice(0, 1).toUpperCase() + tab.slice(1);
+}

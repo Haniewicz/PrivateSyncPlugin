@@ -1,0 +1,51 @@
+.private-sync-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+}
+
+.private-sync-toolbar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.private-sync-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.private-sync-tab {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 6px 8px;
+  color: var(--text-muted);
+}
+
+.private-sync-tab.is-active {
+  color: var(--text-normal);
+  border-bottom: 2px solid var(--interactive-accent);
+}
+
+.private-sync-list {
+  display: grid;
+  gap: 6px;
+}
+
+.private-sync-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+}
+
+.private-sync-muted {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}

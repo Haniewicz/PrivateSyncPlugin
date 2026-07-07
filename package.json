@@ -1,0 +1,21 @@
+{
+  "name": "private-sync-plugin",
+  "version": "0.1.0",
+  "description": "Private server sync plugin for Obsidian.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs --watch",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "typecheck": "tsc -noEmit -skipLibCheck"
+  },
+  "keywords": ["obsidian", "sync"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "builtin-modules": "^5.0.0",
+    "esbuild": "^0.24.2",
+    "obsidian": "^1.7.2",
+    "typescript": "^5.7.2"
+  }
+}
