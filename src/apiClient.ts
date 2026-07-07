@@ -39,6 +39,40 @@ export class ApiClient {
     });
   }
 
+  async uploadChunked(
+    vaultId: string,
+    batchId: string,
+    operation: PendingOperation,
+    content: ArrayBuffer,
+    chunkSize: number
+  ): Promise<void> {
+    const init = await this.post<{ uploadId: string }>(
+      `/api/v1/vaults/${encodeURIComponent(vaultId)}/sync-batches/${encodeURIComponent(batchId)}/chunked-upload`,
+      {
+        clientChangeId: operation.clientChangeId,
+        contentHash: operation.contentHash,
+        size: content.byteLength,
+        chunkSize,
+        totalChunks: Math.ceil(content.byteLength / chunkSize)
+      }
+    );
+    for (let offset = 0, index = 0; offset < content.byteLength; offset += chunkSize, index += 1) {
+      const chunk = content.slice(offset, Math.min(offset + chunkSize, content.byteLength));
+      await this.request(
+        `/api/v1/vaults/${encodeURIComponent(vaultId)}/sync-batches/${encodeURIComponent(batchId)}/chunked-upload/${encodeURIComponent(init.uploadId)}/chunks/${index}`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/octet-stream" },
+          body: chunk
+        }
+      );
+    }
+    await this.post(
+      `/api/v1/vaults/${encodeURIComponent(vaultId)}/sync-batches/${encodeURIComponent(batchId)}/chunked-upload/${encodeURIComponent(init.uploadId)}/finish`,
+      {}
+    );
+  }
+
   async commit(vaultId: string, batchId: string): Promise<{ status: string; revision?: number; conflicts?: string[]; requestId?: string }> {
     return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/sync-batches/${encodeURIComponent(batchId)}/commit`, {});
   }
@@ -48,6 +82,30 @@ export class ApiClient {
       `/api/v1/vaults/${encodeURIComponent(vaultId)}/files/download?path=${encodeURIComponent(path)}`
     );
     return response.arrayBuffer();
+  }
+
+  async downloadChunked(vaultId: string, path: string, size: number, chunkSize: number): Promise<ArrayBuffer> {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (let start = 0; start < size; start += chunkSize) {
+      const end = Math.min(start + chunkSize - 1, size - 1);
+      const response = await this.request(
+        `/api/v1/vaults/${encodeURIComponent(vaultId)}/files/download?path=${encodeURIComponent(path)}`,
+        {
+          headers: { range: `bytes=${start}-${end}` }
+        }
+      );
+      const chunk = new Uint8Array(await response.arrayBuffer());
+      chunks.push(chunk);
+      total += chunk.byteLength;
+    }
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return merged.buffer;
   }
 
   async devices(): Promise<{ devices: unknown[] }> {

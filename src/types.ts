@@ -10,6 +10,7 @@ export type LocalFileStatus =
   | "conflict"
   | "locked_by_request"
   | "deleted_local"
+  | "ignored"
   | "failed";
 
 export type OperationType = "create" | "update" | "delete" | "rename" | "move";
@@ -49,6 +50,10 @@ export type PluginSettings = {
   deviceId: string;
   vaultId: string;
   autoSync: boolean;
+  syncAttachments: boolean;
+  maxAutoSyncFileSizeMb: number;
+  largeFileChunkSizeMb: number;
+  largeFileThresholdMb: number;
 };
 
 export type ServerChange = {

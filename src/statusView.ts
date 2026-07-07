@@ -62,7 +62,7 @@ export class PrivateSyncView extends ItemView {
     this.row(list, "Last applied revision", String(index.lastAppliedRevision));
     this.row(list, "Indexed files", String(files.length));
     this.row(list, "Pending operations", String(index.queue.length));
-    for (const status of ["synced", "pending_upload", "conflict", "locked_by_request", "failed"]) {
+    for (const status of ["synced", "pending_upload", "conflict", "locked_by_request", "ignored", "failed"]) {
       this.row(list, status, String(files.filter((file) => file.status === status).length));
     }
   }

@@ -1,6 +1,7 @@
 import { Notice, TFile, normalizePath } from "obsidian";
 import { ApiClient } from "./apiClient";
 import { sha256, uuid } from "./crypto";
+import { chunkSizeBytes, shouldAutoSync, shouldUseChunkedTransfer } from "./filePolicy";
 import type { LocalIndexStore } from "./localIndex";
 import type PrivateSyncPlugin from "./plugin";
 import type { PendingOperation, ServerChange } from "./types";
@@ -54,9 +55,25 @@ export class SyncEngine {
       const path = normalizePath(file.path);
       if (path.startsWith(".obsidian/")) continue;
       seen.add(path);
+      if (!shouldAutoSync(file, this.plugin.settings)) {
+        const previous = index.files[path];
+        index.files[path] = {
+          path,
+          localHash: previous?.localHash ?? null,
+          size: file.stat.size,
+          mtime: file.stat.mtime,
+          serverRevisionId: previous?.serverRevisionId ?? null,
+          status: "ignored",
+          wasSynced: previous?.wasSynced ?? false
+        };
+        continue;
+      }
+      const previous = index.files[path];
+      if (previous && previous.size === file.stat.size && previous.mtime === file.stat.mtime && previous.status === "synced") {
+        continue;
+      }
       const content = await this.plugin.app.vault.readBinary(file);
       const localHash = await sha256(content);
-      const previous = index.files[path];
       if (!previous) {
         index.files[path] = {
           path,
@@ -103,7 +120,12 @@ export class SyncEngine {
       const record = index.files[operation.path];
       if (record) record.status = "uploading";
       await this.indexStore.save();
-      await this.api.upload(this.plugin.settings.vaultId, batchId, operation, await this.plugin.app.vault.readBinary(file));
+      const content = await this.plugin.app.vault.readBinary(file);
+      if (shouldUseChunkedTransfer(content.byteLength, this.plugin.settings)) {
+        await this.api.uploadChunked(this.plugin.settings.vaultId, batchId, operation, content, chunkSizeBytes(this.plugin.settings));
+      } else {
+        await this.api.upload(this.plugin.settings.vaultId, batchId, operation, content);
+      }
       if (record) record.status = "uploaded_waiting_ack";
     }
     const result = await this.api.commit(this.plugin.settings.vaultId, batchId);
@@ -165,7 +187,9 @@ export class SyncEngine {
       };
       return;
     }
-    const content = await this.api.download(this.plugin.settings.vaultId, change.path);
+    const content = shouldUseChunkedTransfer(change.size, this.plugin.settings)
+      ? await this.api.downloadChunked(this.plugin.settings.vaultId, change.path, change.size, chunkSizeBytes(this.plugin.settings))
+      : await this.api.download(this.plugin.settings.vaultId, change.path);
     await this.writeFile(change.path, content);
     index.files[change.path] = {
       path: change.path,

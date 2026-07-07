@@ -8,7 +8,11 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   deviceToken: "",
   deviceId: "",
   vaultId: "default",
-  autoSync: true
+  autoSync: true,
+  syncAttachments: true,
+  maxAutoSyncFileSizeMb: 100,
+  largeFileChunkSizeMb: 5,
+  largeFileThresholdMb: 10
 };
 
 export const DEFAULT_INDEX: LocalIndex = {

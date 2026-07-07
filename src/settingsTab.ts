@@ -73,5 +73,44 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
+
+    new Setting(containerEl)
+      .setName("Sync attachments")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.syncAttachments).onChange(async (value) => {
+          this.plugin.settings.syncAttachments = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Max automatic file size")
+      .setDesc("Files above this size are indexed as ignored and are not uploaded automatically.")
+      .addText((text) =>
+        text.setValue(String(this.plugin.settings.maxAutoSyncFileSizeMb)).onChange(async (value) => {
+          this.plugin.settings.maxAutoSyncFileSizeMb = Number(value) || 0;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Large file threshold")
+      .setDesc("Files at or above this size use chunked transfer.")
+      .addText((text) =>
+        text.setValue(String(this.plugin.settings.largeFileThresholdMb)).onChange(async (value) => {
+          this.plugin.settings.largeFileThresholdMb = Number(value) || 0;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Chunk size")
+      .setDesc("Upload and download chunk size in MB.")
+      .addText((text) =>
+        text.setValue(String(this.plugin.settings.largeFileChunkSizeMb)).onChange(async (value) => {
+          this.plugin.settings.largeFileChunkSizeMb = Number(value) || 1;
+          await this.plugin.saveSettings();
+        })
+      );
   }
 }
