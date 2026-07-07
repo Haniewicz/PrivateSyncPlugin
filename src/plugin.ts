@@ -18,6 +18,8 @@ export default class PrivateSyncPlugin extends Plugin {
   api = new ApiClient(this.settings.serverUrl, () => this.settings.deviceToken);
   syncEngine = new SyncEngine(this, this.indexStore, this.api);
   private socket: WebSocket | null = null;
+  private reconnectTimeout: number | null = null;
+  private unloading = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -60,14 +62,14 @@ export default class PrivateSyncPlugin extends Plugin {
       })
     );
 
-    this.connectEvents();
-    if (this.settings.autoSync && this.settings.deviceToken) {
-      this.registerTimer(() => this.syncEngine.syncNow().catch((error) => new Notice(error.message)), 1000);
-    }
+    this.registerMobileLifecycleHandlers();
+    this.app.workspace.onLayoutReady(() => this.handleAppBecameActive("layout-ready"));
   }
 
   onunload(): void {
-    this.socket?.close();
+    this.unloading = true;
+    this.clearReconnectTimer();
+    this.closeSocket();
   }
 
   async loadSettings(): Promise<void> {
@@ -95,6 +97,7 @@ export default class PrivateSyncPlugin extends Plugin {
   private recreateApi(): void {
     this.api = new ApiClient(this.settings.serverUrl, () => this.settings.deviceToken);
     this.syncEngine = new SyncEngine(this, this.indexStore, this.api);
+    this.reconnectEvents();
   }
 
   private async activateView(): Promise<void> {
@@ -113,25 +116,95 @@ export default class PrivateSyncPlugin extends Plugin {
     }
   }, 1500);
 
+  private registerMobileLifecycleHandlers(): void {
+    const onActive = () => this.handleAppBecameActive("app-active");
+    const onHidden = () => this.handleAppWentInactive();
+
+    this.registerDomEvent(window, "focus", onActive);
+    this.registerDomEvent(window, "pageshow", onActive);
+    this.registerDomEvent(window, "online", onActive);
+    this.registerDomEvent(document, "visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        this.handleAppBecameActive("visible");
+      } else {
+        onHidden();
+      }
+    });
+  }
+
+  private handleAppBecameActive(_reason: string): void {
+    if (!this.settings.autoSync || !this.settings.deviceToken) return;
+    this.reconnectEvents();
+    this.debouncedSync();
+  }
+
+  private handleAppWentInactive(): void {
+    this.clearReconnectTimer();
+    this.closeSocket();
+  }
+
+  private reconnectEvents(): void {
+    this.clearReconnectTimer();
+    this.closeSocket();
+    this.connectEvents();
+  }
+
   private connectEvents(): void {
-    if (!this.settings.deviceToken) return;
+    if (!this.settings.deviceToken || this.unloading) return;
+    if (document.visibilityState === "hidden") return;
+    if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) return;
+
     const url = this.settings.serverUrl.replace(/^http/, "ws").replace(/\/$/, "") + `/api/v1/events?token=${encodeURIComponent(this.settings.deviceToken)}`;
-    this.socket = new WebSocket(url);
-    this.socket.onmessage = (event) => {
-      const message = JSON.parse(String(event.data)) as { type?: string };
+    const socket = new WebSocket(url);
+    this.socket = socket;
+    socket.onopen = () => {
+      if (this.socket !== socket) return;
+      this.debouncedSync();
+    };
+    socket.onmessage = (event) => {
+      if (this.socket !== socket) return;
+      const message = parseServerEvent(event.data);
       if (message.type === "vault_changed" || message.type === "request_created" || message.type === "conflict_created") {
         this.syncEngine.syncNow().catch((error) => new Notice(`Private Sync: ${error.message}`));
       }
       this.refreshView();
     };
-    this.socket.onclose = () => {
-      this.registerTimer(() => this.connectEvents(), 5000);
+    socket.onclose = () => {
+      if (this.socket !== socket) return;
+      this.socket = null;
+      if (!this.unloading && document.visibilityState !== "hidden") {
+        this.scheduleReconnect();
+      }
+    };
+    socket.onerror = () => {
+      if (this.socket === socket) socket.close();
     };
   }
 
-  private registerTimer(callback: () => void, delay: number): void {
-    const timeout = window.setTimeout(callback, delay);
-    this.register(() => window.clearTimeout(timeout));
+  private scheduleReconnect(): void {
+    this.clearReconnectTimer();
+    this.reconnectTimeout = window.setTimeout(() => {
+      this.reconnectTimeout = null;
+      this.connectEvents();
+    }, 5000);
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimeout !== null) {
+      window.clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+  }
+
+  private closeSocket(): void {
+    const socket = this.socket;
+    if (!socket) return;
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onclose = null;
+    socket.onerror = null;
+    socket.close();
+    this.socket = null;
   }
 }
 
@@ -141,4 +214,12 @@ function debounce<T extends (...args: never[]) => void | Promise<void>>(fn: T, d
     window.clearTimeout(timeout);
     timeout = window.setTimeout(() => void fn(...args), delay);
   }) as T;
+}
+
+function parseServerEvent(data: unknown): { type?: string } {
+  try {
+    return JSON.parse(String(data)) as { type?: string };
+  } catch {
+    return {};
+  }
 }

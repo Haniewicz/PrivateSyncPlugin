@@ -44,6 +44,21 @@ Aktualne limity są dostępne w ustawieniach pluginu:
 
 Ważne ograniczenie: API Obsidiana nadal wymaga od pluginu odczytania zawartości zmienionego pliku jako `ArrayBuffer`, zanim można policzyć hash i rozpocząć upload. Chunked transfer zmniejsza ryzyko po stronie sieci i serwera, ale nie jest jeszcze pełnym streamingiem z dysku lokalnego. Dla bardzo dużych załączników najlepszą ochroną pozostaje limit automatycznej synchronizacji.
 
+## Mobile
+
+Plugin jest przygotowany do podstawowego działania w Obsidian Mobile:
+
+- nie używa Node.js, Electron ani `FileSystemAdapter` w kodzie pluginu,
+- używa `requestUrl` do komunikacji HTTP,
+- używa `Vault.configDir` zamiast stałej ścieżki `.obsidian`,
+- usuwa pliki przez `FileManager.trashFile`,
+- po starcie i gotowości layoutu wykonuje synchronizację,
+- po powrocie aplikacji do widoku aktywnego wykonuje reconnect WebSocket i synchronizację,
+- po `focus`, `pageshow`, `online` i `visibilitychange` do `visible` sprawdza zmiany przez API,
+- przy przejściu aplikacji w tło zamyka WebSocket i nie zakłada działania w tle.
+
+WebSocket na mobile jest traktowany jako kanał pomocniczy dla eventów, nie jako źródło prawdy. Po każdej aktywacji aplikacji plugin pobiera stan przez HTTP API na podstawie `last_applied_revision`.
+
 ## Prywatność i wymagania
 
 - Plugin łączy się z prywatnym serwerem skonfigurowanym przez użytkownika.
