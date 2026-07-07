@@ -162,6 +162,12 @@ function formatHttpError(response: RequestUrlResponse): string {
   if (!text) return `Server returned HTTP ${response.status}.`;
   try {
     const body = JSON.parse(text) as { error?: string; message?: string };
+    if (body.error === "invalid_password") {
+      return "Invalid server password. Use the account password from server setup in Pairing password. If you generated a recovery pairing code, paste it into Recovery pairing code.";
+    }
+    if (body.error === "server_not_configured") {
+      return "Server is not configured yet. Run syncctl setup on the server first.";
+    }
     return body.error || body.message ? `Server returned HTTP ${response.status}: ${body.error ?? body.message}` : `Server returned HTTP ${response.status}.`;
   } catch {
     return `Server returned HTTP ${response.status}: ${text.slice(0, 200)}`;

@@ -3,6 +3,8 @@ import type PrivateSyncPlugin from "./plugin";
 import type { DeviceType } from "./types";
 
 export class PrivateSyncSettingTab extends PluginSettingTab {
+  private recoveryPairingCode = "";
+
   constructor(app: App, private readonly plugin: PrivateSyncPlugin) {
     super(app, plugin);
   }
@@ -58,13 +60,26 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
+      .setName("Recovery pairing code")
+      .setDesc("Optional one-time code from syncctl pairing-code create. It does not replace the server password.")
+      .addText((text) =>
+        text
+          .setPlaceholder("optional")
+          .setValue(this.recoveryPairingCode)
+          .onChange((value) => {
+            this.recoveryPairingCode = value.trim();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Pair this device")
       .addButton((button) =>
         button.setButtonText("Pair").setCta().onClick(async () => {
           button.setDisabled(true);
           button.setButtonText("Pairing...");
           try {
-            await this.plugin.syncEngine.pairDevice();
+            await this.plugin.syncEngine.pairDevice(this.recoveryPairingCode || undefined);
+            this.recoveryPairingCode = "";
             this.display();
           } catch (error) {
             new Notice(`Private Sync pairing failed: ${errorMessage(error)}`, 10000);
