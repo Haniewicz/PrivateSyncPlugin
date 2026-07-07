@@ -11,6 +11,7 @@ Source docs:
 
 Useful release reminders:
 
+- Dev prereleases in this repository use the format `<base-version>-dev0.<n>`, for example `0.1.0-dev0.1`.
 - Community plugin releases should attach `main.js`, `manifest.json`, and `styles.css` if styles are used.
 - `main.js` should not be committed to the source repository.
 - The official community release tag is expected to match the version in `manifest.json`.
