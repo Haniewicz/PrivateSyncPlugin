@@ -12,6 +12,7 @@
   - build and audit the plugin,
   - then create the release commit/tag/release from `master`.
 - Dev releases are created from `dev` and should be marked as prerelease on GitHub.
+- After every plugin fix/change committed on `dev`, create a new dev prerelease.
 - Dev release versions must use the format `<base-version>-dev0.<n>`, for example `0.1.0-dev0.1`, `0.1.0-dev0.2`.
 - Do not use dev release formats such as `<base-version>-dev.<n>`.
 
