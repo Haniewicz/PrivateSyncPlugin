@@ -53,7 +53,7 @@ export class SyncEngine {
     const files = this.plugin.app.vault.getFiles();
     for (const file of files) {
       const path = normalizePath(file.path);
-      if (path.startsWith(".obsidian/")) continue;
+      if (path.startsWith(`${this.plugin.app.vault.configDir}/`)) continue;
       seen.add(path);
       if (!shouldAutoSync(file, this.plugin.settings)) {
         const previous = index.files[path];
@@ -175,7 +175,7 @@ export class SyncEngine {
     }
     if (change.deleted) {
       const file = this.plugin.app.vault.getAbstractFileByPath(change.path);
-      if (file instanceof TFile) await this.plugin.app.vault.delete(file);
+      if (file instanceof TFile) await this.plugin.app.fileManager.trashFile(file);
       index.files[change.path] = {
         path: change.path,
         localHash: null,

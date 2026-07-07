@@ -1,4 +1,7 @@
+import { requestUrl, type RequestUrlParam, type RequestUrlResponse } from "obsidian";
 import type { DeviceType, PendingOperation, ServerChange } from "./types";
+
+type ApiRequestInit = Omit<RequestUrlParam, "url"> & { authenticated?: boolean };
 
 export class ApiClient {
   constructor(private readonly serverUrl: string, private readonly getToken: () => string) {}
@@ -29,14 +32,7 @@ export class ApiClient {
   }
 
   async upload(vaultId: string, batchId: string, operation: PendingOperation, content: ArrayBuffer): Promise<void> {
-    const form = new FormData();
-    form.append("clientChangeId", operation.clientChangeId);
-    form.append("contentHash", operation.contentHash ?? "");
-    form.append("file", new Blob([content]), operation.path);
-    await this.request(`/api/v1/vaults/${encodeURIComponent(vaultId)}/sync-batches/${encodeURIComponent(batchId)}/upload`, {
-      method: "POST",
-      body: form
-    });
+    await this.uploadChunked(vaultId, batchId, operation, content, content.byteLength || 1);
   }
 
   async uploadChunked(
@@ -81,7 +77,7 @@ export class ApiClient {
     const response = await this.request(
       `/api/v1/vaults/${encodeURIComponent(vaultId)}/files/download?path=${encodeURIComponent(path)}`
     );
-    return response.arrayBuffer();
+    return response.arrayBuffer;
   }
 
   async downloadChunked(vaultId: string, path: string, size: number, chunkSize: number): Promise<ArrayBuffer> {
@@ -95,7 +91,7 @@ export class ApiClient {
           headers: { range: `bytes=${start}-${end}` }
         }
       );
-      const chunk = new Uint8Array(await response.arrayBuffer());
+      const chunk = new Uint8Array(response.arrayBuffer);
       chunks.push(chunk);
       total += chunk.byteLength;
     }
@@ -116,28 +112,36 @@ export class ApiClient {
     return this.get(`/api/v1/vaults/${encodeURIComponent(vaultId)}/requests`);
   }
 
-  private get<T>(path: string): Promise<T> {
-    return this.request(path).then((response) => response.json() as Promise<T>);
+  private async get<T>(path: string): Promise<T> {
+    const response = await this.request(path);
+    return response.json as T;
   }
 
-  private post<T>(path: string, body: unknown, authenticated = true): Promise<T> {
-    return this.request(path, {
+  private async post<T>(path: string, body: unknown, authenticated = true): Promise<T> {
+    const response = await this.request(path, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      contentType: "application/json",
       body: JSON.stringify(body),
       authenticated
-    }).then((response) => response.json() as Promise<T>);
+    });
+    return response.json as T;
   }
 
-  private async request(path: string, init: RequestInit & { authenticated?: boolean } = {}): Promise<Response> {
-    const headers = new Headers(init.headers);
+  private async request(path: string, init: ApiRequestInit = {}): Promise<RequestUrlResponse> {
+    const headers: Record<string, string> = { ...(init.headers ?? {}) };
     if (init.authenticated !== false) {
       const token = this.getToken();
-      if (token) headers.set("authorization", `Bearer ${token}`);
+      if (token) headers.authorization = `Bearer ${token}`;
     }
-    const response = await fetch(`${this.serverUrl.replace(/\/$/, "")}${path}`, { ...init, headers });
-    if (!response.ok) {
-      throw new Error(`Server returned ${response.status}: ${await response.text()}`);
+    const { authenticated, ...requestInit } = init;
+    const response = await requestUrl({
+      ...requestInit,
+      url: `${this.serverUrl.replace(/\/$/, "")}${path}`,
+      headers,
+      throw: false
+    });
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`Server returned ${response.status}: ${response.text}`);
     }
     return response;
   }

@@ -43,3 +43,12 @@ Aktualne limity są dostępne w ustawieniach pluginu:
 - `Chunk size`.
 
 Ważne ograniczenie: API Obsidiana nadal wymaga od pluginu odczytania zawartości zmienionego pliku jako `ArrayBuffer`, zanim można policzyć hash i rozpocząć upload. Chunked transfer zmniejsza ryzyko po stronie sieci i serwera, ale nie jest jeszcze pełnym streamingiem z dysku lokalnego. Dla bardzo dużych załączników najlepszą ochroną pozostaje limit automatycznej synchronizacji.
+
+## Prywatność i wymagania
+
+- Plugin łączy się z prywatnym serwerem skonfigurowanym przez użytkownika.
+- Plugin wymaga sparowania urządzenia i przechowuje lokalny `device_token` w ustawieniach pluginu.
+- Plugin czyta pliki z vaulta, liczy ich hashe i wysyła zmienione pliki do skonfigurowanego serwera.
+- Plugin pobiera zmiany z serwera i zapisuje je do vaulta.
+- Plugin nie zawiera telemetrii, reklam ani zewnętrznych usług analitycznych.
+- Plugin nie wysyła danych do żadnego domyślnego serwera autora; adres serwera ustawia użytkownik.
