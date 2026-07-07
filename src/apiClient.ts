@@ -6,6 +6,10 @@ type ApiRequestInit = Omit<RequestUrlParam, "url"> & { authenticated?: boolean }
 export class ApiClient {
   constructor(private readonly serverUrl: string, private readonly getToken: () => string) {}
 
+  async serverInfo(): Promise<{ protocolVersion: string; serverVersion: string; features: string[] }> {
+    return this.get("/api/v1/server-info");
+  }
+
   async login(password: string): Promise<{ ok: true; initialSetup: boolean }> {
     return this.post("/api/v1/auth/login", { password }, false);
   }
@@ -134,15 +138,36 @@ export class ApiClient {
       if (token) headers.authorization = `Bearer ${token}`;
     }
     const { authenticated, ...requestInit } = init;
-    const response = await requestUrl({
-      ...requestInit,
-      url: `${this.serverUrl.replace(/\/$/, "")}${path}`,
-      headers,
-      throw: false
-    });
+    const url = `${this.serverUrl.replace(/\/$/, "")}${path}`;
+    let response: RequestUrlResponse;
+    try {
+      response = await requestUrl({
+        ...requestInit,
+        url,
+        headers,
+        throw: false
+      });
+    } catch (error) {
+      throw new Error(`Cannot reach Private Sync server at ${this.serverUrl}: ${formatRequestError(error)}`);
+    }
     if (response.status < 200 || response.status >= 300) {
-      throw new Error(`Server returned ${response.status}: ${response.text}`);
+      throw new Error(formatHttpError(response));
     }
     return response;
   }
+}
+
+function formatHttpError(response: RequestUrlResponse): string {
+  const text = response.text?.trim();
+  if (!text) return `Server returned HTTP ${response.status}.`;
+  try {
+    const body = JSON.parse(text) as { error?: string; message?: string };
+    return body.error || body.message ? `Server returned HTTP ${response.status}: ${body.error ?? body.message}` : `Server returned HTTP ${response.status}.`;
+  } catch {
+    return `Server returned HTTP ${response.status}: ${text.slice(0, 200)}`;
+  }
+}
+
+function formatRequestError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

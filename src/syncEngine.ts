@@ -17,6 +17,16 @@ export class SyncEngine {
 
   async pairDevice(recoveryPairingCode?: string): Promise<void> {
     const settings = this.plugin.settings;
+    if (!settings.serverUrl.trim()) {
+      throw new Error("Enter the Private Sync server URL before pairing.");
+    }
+    if (!settings.password.trim()) {
+      throw new Error("Enter the pairing password before pairing.");
+    }
+    if (!settings.deviceName.trim()) {
+      throw new Error("Enter this device name before pairing.");
+    }
+    await this.api.serverInfo();
     const response = await this.api.requestDevice({
       password: settings.password,
       deviceName: settings.deviceName,

@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type PrivateSyncPlugin from "./plugin";
 import type { DeviceType } from "./types";
 
@@ -61,7 +61,17 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
       .setName("Pair this device")
       .addButton((button) =>
         button.setButtonText("Pair").setCta().onClick(async () => {
-          await this.plugin.syncEngine.pairDevice();
+          button.setDisabled(true);
+          button.setButtonText("Pairing...");
+          try {
+            await this.plugin.syncEngine.pairDevice();
+            this.display();
+          } catch (error) {
+            new Notice(`Private Sync pairing failed: ${errorMessage(error)}`, 10000);
+          } finally {
+            button.setDisabled(false);
+            button.setButtonText("Pair");
+          }
         })
       );
 
@@ -113,4 +123,8 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
         })
       );
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
