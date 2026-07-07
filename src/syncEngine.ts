@@ -15,12 +15,13 @@ export class SyncEngine {
     private readonly api: ApiClient
   ) {}
 
-  async pairDevice(recoveryPairingCode?: string): Promise<void> {
+  async pairDevice(input: { password?: string; recoveryPairingCode?: string } = {}): Promise<void> {
     const settings = this.plugin.settings;
+    const password = input.password ?? settings.password;
     if (!settings.serverUrl.trim()) {
       throw new Error("Enter the Private Sync server URL before pairing.");
     }
-    if (!settings.password.trim()) {
+    if (!password.trim()) {
       throw new Error("Enter the pairing password before pairing.");
     }
     if (!settings.deviceName.trim()) {
@@ -28,10 +29,10 @@ export class SyncEngine {
     }
     await this.api.serverInfo();
     const response = await this.api.requestDevice({
-      password: settings.password,
+      password,
       deviceName: settings.deviceName,
       deviceType: settings.deviceType,
-      recoveryPairingCode
+      recoveryPairingCode: input.recoveryPairingCode
     });
     if (response.status === "approved") {
       settings.deviceId = response.deviceId;

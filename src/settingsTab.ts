@@ -3,6 +3,7 @@ import type PrivateSyncPlugin from "./plugin";
 import type { DeviceType } from "./types";
 
 export class PrivateSyncSettingTab extends PluginSettingTab {
+  private pairingPassword = "";
   private recoveryPairingCode = "";
 
   constructor(app: App, private readonly plugin: PrivateSyncPlugin) {
@@ -12,6 +13,7 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+    if (!this.pairingPassword) this.pairingPassword = this.plugin.settings.password;
 
     new Setting(containerEl)
       .setName("Server URL")
@@ -48,8 +50,9 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
       .setName("Pairing password")
       .addText((text) =>
         text
-          .setValue(this.plugin.settings.password)
+          .setValue(this.pairingPassword)
           .onChange(async (value) => {
+            this.pairingPassword = value;
             this.plugin.settings.password = value;
             await this.plugin.saveSettings();
           })
@@ -72,13 +75,36 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Test server password")
+      .setDesc("Checks this Server URL and the current Pairing password without pairing a device.")
+      .addButton((button) =>
+        button.setButtonText("Test").onClick(async () => {
+          button.setDisabled(true);
+          button.setButtonText("Testing...");
+          try {
+            await this.testPassword();
+            new Notice("Private Sync: server password is valid.", 8000);
+          } catch (error) {
+            new Notice(`Private Sync password test failed: ${errorMessage(error)}`, 10000);
+          } finally {
+            button.setDisabled(false);
+            button.setButtonText("Test");
+          }
+        })
+      );
+
+    new Setting(containerEl)
       .setName("Pair this device")
       .addButton((button) =>
         button.setButtonText("Pair").setCta().onClick(async () => {
           button.setDisabled(true);
           button.setButtonText("Pairing...");
           try {
-            await this.plugin.syncEngine.pairDevice(this.recoveryPairingCode || undefined);
+            await this.plugin.syncEngine.pairDevice({
+              password: this.pairingPassword,
+              recoveryPairingCode: this.recoveryPairingCode || undefined
+            });
+            this.pairingPassword = "";
             this.recoveryPairingCode = "";
             this.display();
           } catch (error) {
@@ -137,6 +163,17 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
+  }
+
+  private async testPassword(): Promise<void> {
+    if (!this.plugin.settings.serverUrl.trim()) {
+      throw new Error("Enter the Private Sync server URL first.");
+    }
+    if (!this.pairingPassword.trim()) {
+      throw new Error("Enter the pairing password first.");
+    }
+    await this.plugin.api.serverInfo();
+    await this.plugin.api.login(this.pairingPassword);
   }
 }
 
