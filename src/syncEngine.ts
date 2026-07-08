@@ -16,6 +16,7 @@ export class SyncEngine {
   ) {}
 
   async pairDevice(input: { password?: string; recoveryPairingCode?: string } = {}): Promise<void> {
+    if (this.plugin.handleOfflineSyncAttempt()) return;
     const settings = this.plugin.settings;
     const password = input.password ?? settings.password;
     if (!settings.serverUrl.trim()) {
@@ -45,6 +46,7 @@ export class SyncEngine {
   }
 
   async syncNow(): Promise<void> {
+    if (this.plugin.handleOfflineSyncAttempt()) return;
     if (this.running) return;
     this.running = true;
     try {
@@ -294,6 +296,7 @@ export class SyncEngine {
     const attempts = 150;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       await sleep(2000);
+      if (this.plugin.handleOfflineSyncAttempt()) continue;
       const response = await this.api.deviceRequestStatus(requestId, password);
       if (response.status === "approved") {
         await this.savePairedDevice(response.deviceId, response.deviceToken);

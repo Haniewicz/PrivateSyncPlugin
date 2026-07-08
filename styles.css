@@ -53,3 +53,17 @@
 .private-sync-request-row {
   grid-template-columns: minmax(0, 1fr) auto;
 }
+
+.private-sync-status-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.private-sync-status-icon {
+  display: inline-flex;
+}
+
+.private-sync-status-bar.is-offline {
+  color: var(--text-warning);
+}

@@ -1,4 +1,4 @@
-import { Notice, Plugin, TFile, WorkspaceLeaf } from "obsidian";
+import { Notice, Plugin, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import { ApiClient } from "./apiClient";
 import { DEFAULT_INDEX, DEFAULT_SETTINGS } from "./defaults";
 import { LocalIndexStore } from "./localIndex";
@@ -20,6 +20,8 @@ export default class PrivateSyncPlugin extends Plugin {
   syncEngine = new SyncEngine(this, this.indexStore, this.api);
   private socket: WebSocket | null = null;
   private reconnectTimeout: number | null = null;
+  private statusBarItem: HTMLElement | null = null;
+  private offlineNoticeShown = false;
   private activePairingRequestModals = new Set<string>();
   private unloading = false;
 
@@ -30,6 +32,9 @@ export default class PrivateSyncPlugin extends Plugin {
 
     this.registerView(PRIVATE_SYNC_VIEW, (leaf: WorkspaceLeaf) => new PrivateSyncView(leaf, this));
     this.addRibbonIcon("refresh-cw", "Private Sync", () => this.activateView());
+    this.statusBarItem = this.addStatusBarItem();
+    this.statusBarItem.addClass("private-sync-status-bar");
+    this.updateConnectionStatus();
     this.addSettingTab(new PrivateSyncSettingTab(this.app, this));
 
     this.addCommand({
@@ -102,6 +107,7 @@ export default class PrivateSyncPlugin extends Plugin {
   }
 
   async checkPairingRequests(): Promise<void> {
+    if (this.handleOfflineSyncAttempt()) return;
     if (!this.settings.deviceToken || !this.settings.vaultId) return;
     try {
       const response = await this.api.requests(this.settings.vaultId);
@@ -129,6 +135,7 @@ export default class PrivateSyncPlugin extends Plugin {
 
   private debouncedSync = debounce(async () => {
     if (!this.settings.deviceToken) return;
+    if (this.handleOfflineSyncAttempt()) return;
     try {
       await this.syncEngine.syncNow();
     } catch (error) {
@@ -139,10 +146,15 @@ export default class PrivateSyncPlugin extends Plugin {
   private registerMobileLifecycleHandlers(): void {
     const onActive = () => this.handleAppBecameActive("app-active");
     const onHidden = () => this.handleAppWentInactive();
+    const onOffline = () => {
+      this.handleAppWentInactive();
+      this.handleOfflineSyncAttempt();
+    };
 
     this.registerDomEvent(window, "focus", onActive);
     this.registerDomEvent(window, "pageshow", onActive);
     this.registerDomEvent(window, "online", onActive);
+    this.registerDomEvent(window, "offline", onOffline);
     this.registerDomEvent(document, "visibilitychange", () => {
       if (document.visibilityState === "visible") {
         this.handleAppBecameActive("visible");
@@ -153,7 +165,12 @@ export default class PrivateSyncPlugin extends Plugin {
   }
 
   private handleAppBecameActive(_reason: string): void {
+    if (!this.isOffline()) {
+      this.offlineNoticeShown = false;
+    }
+    this.updateConnectionStatus();
     if (!this.settings.deviceToken) return;
+    if (this.handleOfflineSyncAttempt()) return;
     this.reconnectEvents();
     this.checkPairingRequests();
     if (this.settings.autoSync) this.debouncedSync();
@@ -172,6 +189,7 @@ export default class PrivateSyncPlugin extends Plugin {
 
   private connectEvents(): void {
     if (!this.settings.deviceToken || this.unloading) return;
+    if (this.isOffline()) return;
     if (document.visibilityState === "hidden") return;
     if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) return;
 
@@ -190,7 +208,9 @@ export default class PrivateSyncPlugin extends Plugin {
         this.checkPairingRequests();
       }
       if (message.type === "vault_changed" || message.type === "conflict_created") {
-        this.syncEngine.syncNow().catch((error) => new Notice(`Private Sync: ${error.message}`));
+        if (!this.handleOfflineSyncAttempt()) {
+          this.syncEngine.syncNow().catch((error) => new Notice(`Private Sync: ${error.message}`));
+        }
       }
       this.refreshView();
     };
@@ -241,6 +261,31 @@ export default class PrivateSyncPlugin extends Plugin {
     new PairingApprovalModal(this, request, payload, () => {
       this.activePairingRequestModals.delete(request.id);
     }).open();
+  }
+
+  isOffline(): boolean {
+    return typeof navigator !== "undefined" && navigator.onLine === false;
+  }
+
+  handleOfflineSyncAttempt(): boolean {
+    if (!this.isOffline()) return false;
+    this.updateConnectionStatus();
+    if (!this.offlineNoticeShown) {
+      this.offlineNoticeShown = true;
+      new Notice("Jesteś offline. Dane nie są synchronizowane", 10000);
+    }
+    return true;
+  }
+
+  private updateConnectionStatus(): void {
+    if (!this.statusBarItem) return;
+    this.statusBarItem.empty();
+    const icon = this.statusBarItem.createSpan({ cls: "private-sync-status-icon" });
+    setIcon(icon, this.isOffline() ? "cloud-off" : "cloud");
+    this.statusBarItem.createSpan({
+      text: this.isOffline() ? "Private Sync: offline" : "Private Sync: online"
+    });
+    this.statusBarItem.toggleClass("is-offline", this.isOffline());
   }
 }
 
