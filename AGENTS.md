@@ -4,7 +4,7 @@
 
 - Default development branch: `dev`.
 - If work starts on any branch other than `dev`, switch to `dev` before making changes.
-- Do not make ordinary changes directly on the main branch (`master` in this repository).
+- Do not make ordinary plugin changes directly on the main branch (`master` in this repository).
 - A full release on the main branch is performed only when the user explicitly asks for a full release.
 - For a full release:
   - switch to `master`,
