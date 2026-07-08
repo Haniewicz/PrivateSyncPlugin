@@ -63,6 +63,9 @@ export type PluginSettings = {
   vaultLinked: boolean;
   autoSync: boolean;
   syncAttachments: boolean;
+  syncObsidianSettings: boolean;
+  syncCommunityPlugins: boolean;
+  replaceRemoteCommunityPluginsWithLocal: boolean;
   maxAutoSyncFileSizeMb: number;
   largeFileChunkSizeMb: number;
   largeFileThresholdMb: number;

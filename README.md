@@ -21,6 +21,7 @@ Skopiuj `manifest.json`, `main.js` i `styles.css` do folderu pluginu w vaultcie 
 - batch upload do serwera,
 - pobieranie zmian od `last_applied_revision`,
 - wybór albo tworzenie server-vaulta przed trwałym powiązaniem lokalnego vaulta,
+- opcjonalna synchronizacja wybranych ustawień Obsidiana i katalogów community pluginów,
 - widok boczny: Status, Urządzenia, Konflikty, Historia.
 
 Na tym etapie lokalny indeks używa trwałego storage Obsidiana. SQLite warto dodać jako kolejny krok dla dużych vaultów.
@@ -28,6 +29,10 @@ Na tym etapie lokalny indeks używa trwałego storage Obsidiana. SQLite warto do
 Każdy lokalny vault Obsidiana wskazuje jeden stały server-vault. Po powiązaniu lokalnego vaulta wybór server-vaulta jest blokowany, żeby uniknąć przypadkowego mieszania lub nadpisywania plików między różnymi vaultami.
 
 Przy pierwszym powiązaniu plugin liczy lokalny manifest plików i pyta serwer o ocenę bezpieczeństwa. Pusty server-vault wymaga potwierdzenia uploadu `Local -> Remote`. Niepusty server-vault pokazuje ocenę ryzyka i wymaga jawnej decyzji: `Remote -> Local`, `Local -> Remote` albo anulowanie. Po powiązaniu normalny sync działa już tylko z tym jednym server-vaultem.
+
+Synchronizacja ustawień Obsidiana jest osobnym przełącznikiem. Plugin synchronizuje tylko wybrane pliki z katalogu konfiguracji vaulta, m.in. stan core pluginów, daily notes, templates, hotkeys i podobne ustawienia wbudowane. Nie synchronizuje workspace ani całego katalogu konfiguracji w ciemno.
+
+Synchronizacja community pluginów jest osobnym przełącznikiem pod ustawieniami Obsidiana. Jeśli plugin o tym samym ID istnieje lokalnie i zdalnie, Private Sync nie porównuje jego hashy ani wersji i pomija cały katalog tego pluginu. Pluginy brakujące po jednej stronie mogą zostać pobrane albo wysłane. Dodatkowy przełącznik pozwala, przy jawnej operacji `Local -> Remote`, zastąpić zdalne katalogi community pluginów lokalnymi.
 
 ## Duże pliki i załączniki
 

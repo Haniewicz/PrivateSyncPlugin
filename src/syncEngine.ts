@@ -4,6 +4,7 @@ import { sha256, uuid } from "./crypto";
 import { chunkSizeBytes, shouldAutoSync, shouldUseChunkedTransfer } from "./filePolicy";
 import type { LocalIndexStore } from "./localIndex";
 import type PrivateSyncPlugin from "./plugin";
+import { collectCommunityPluginIds, getCommunityPluginId, shouldSyncFile, shouldSyncPath } from "./settingsSyncPolicy";
 import type { PendingOperation, ServerChange } from "./types";
 import { openVaultConnectionModal } from "./vaultConnectionModal";
 import { buildLocalVaultManifest } from "./vaultManifest";
@@ -156,15 +157,20 @@ export class SyncEngine {
     await this.indexStore.reset();
     const index = this.indexStore.get();
     const remotePaths = new Set(snapshot.files.keys());
+    const remotePluginIds = collectCommunityPluginIds(remotePaths, this.plugin.app.vault.configDir);
+    const localPluginIds = this.getLocalCommunityPluginIds();
 
     for (const file of this.getSyncableLocalFiles()) {
       const path = normalizePath(file.path);
+      if (this.shouldKeepLocalPluginPath(path, remotePluginIds)) continue;
       if (!remotePaths.has(path)) {
         await this.plugin.app.fileManager.trashFile(file);
       }
     }
 
     for (const change of [...snapshot.files.values()].sort((left, right) => left.path.localeCompare(right.path))) {
+      if (!shouldSyncPath(change.path, this.plugin.settings, this.plugin.app.vault.configDir)) continue;
+      if (this.shouldKeepLocalPluginPath(change.path, remotePluginIds, localPluginIds)) continue;
       const content = shouldUseChunkedTransfer(change.size, this.plugin.settings)
         ? await this.api.downloadChunked(this.plugin.settings.vaultId, change.path, change.size, chunkSizeBytes(this.plugin.settings))
         : await this.api.download(this.plugin.settings.vaultId, change.path);
@@ -191,9 +197,12 @@ export class SyncEngine {
     await this.indexStore.reset();
     const index = this.indexStore.get();
     const seen = new Set<string>();
+    const remotePluginIds = collectCommunityPluginIds(snapshot.files.keys(), this.plugin.app.vault.configDir);
+    const replaceRemotePlugins = this.plugin.settings.replaceRemoteCommunityPluginsWithLocal;
 
     for (const file of this.getSyncableLocalFiles()) {
       const path = normalizePath(file.path);
+      if (this.shouldSkipLocalPluginUpload(path, remotePluginIds, replaceRemotePlugins)) continue;
       seen.add(path);
       const content = await this.plugin.app.vault.readBinary(file);
       const localHash = await sha256(content);
@@ -215,6 +224,8 @@ export class SyncEngine {
 
     for (const [path, remote] of snapshot.files) {
       if (seen.has(path)) continue;
+      if (!shouldSyncPath(path, this.plugin.settings, this.plugin.app.vault.configDir)) continue;
+      if (this.shouldSkipRemotePluginDelete(path, replaceRemotePlugins)) continue;
       await this.indexStore.enqueue({
         clientChangeId: uuid(),
         type: "delete",
@@ -236,11 +247,11 @@ export class SyncEngine {
     const index = this.indexStore.get();
     const seen = new Set<string>();
     const files = this.plugin.app.vault.getFiles();
+    const remotePluginIds = await this.getRemoteCommunityPluginIdsForLocalScan();
     for (const file of files) {
       const path = normalizePath(file.path);
-      if (path.startsWith(`${this.plugin.app.vault.configDir}/`)) continue;
       seen.add(path);
-      if (!shouldAutoSync(file, this.plugin.settings)) {
+      if (!shouldSyncFile(file, this.plugin.settings, this.plugin.app.vault.configDir) || this.shouldSkipLocalPluginUpload(path, remotePluginIds, false) || !shouldAutoSync(file, this.plugin.settings)) {
         const previous = index.files[path];
         index.files[path] = {
           path,
@@ -281,8 +292,11 @@ export class SyncEngine {
 
     for (const [path, record] of Object.entries(index.files)) {
       const hasQueuedOperation = index.queue.some((operation) => operation.path === path);
+      const protectedPluginPath = this.shouldSkipRemotePluginDelete(path, false);
       if (
         !seen.has(path) &&
+        shouldSyncPath(path, this.plugin.settings, this.plugin.app.vault.configDir) &&
+        !protectedPluginPath &&
         record.wasSynced &&
         record.status !== "deleted_local" &&
         record.status !== "conflict" &&
@@ -305,9 +319,14 @@ export class SyncEngine {
   async pushQueue(): Promise<void> {
     const index = this.indexStore.get();
     if (index.queue.length === 0) return;
+    const skippedOperationIds: string[] = [];
     const uploadPayloads = new Map<string, ArrayBuffer>();
     const batchOperations: PendingOperation[] = [];
     for (const operation of index.queue) {
+      if (!shouldSyncPath(operation.path, this.plugin.settings, this.plugin.app.vault.configDir)) {
+        skippedOperationIds.push(operation.clientChangeId);
+        continue;
+      }
       if (operation.type === "delete") {
         batchOperations.push(operation);
         continue;
@@ -326,6 +345,9 @@ export class SyncEngine {
       }
       uploadPayloads.set(operation.clientChangeId, content);
       batchOperations.push(operation);
+    }
+    if (skippedOperationIds.length > 0) {
+      await this.indexStore.removeFromQueue(skippedOperationIds);
     }
     if (batchOperations.length === 0) {
       await this.indexStore.save();
@@ -401,8 +423,9 @@ export class SyncEngine {
   async pullChanges(): Promise<void> {
     const index = this.indexStore.get();
     const response = await this.api.getChanges(this.plugin.settings.vaultId, index.lastAppliedRevision);
+    const localPluginIds = this.getLocalCommunityPluginIds();
     for (const change of response.changes) {
-      await this.applyServerChange(change);
+      await this.applyServerChange(change, localPluginIds);
       index.lastAppliedRevision = Math.max(index.lastAppliedRevision, change.vaultRevision);
     }
     await this.indexStore.save();
@@ -482,9 +505,11 @@ export class SyncEngine {
     new Notice(`Private Sync: kept local version for ${path}.`, 8000);
   }
 
-  private async applyServerChange(change: ServerChange): Promise<void> {
+  private async applyServerChange(change: ServerChange, localPluginIds = this.getLocalCommunityPluginIds()): Promise<void> {
     const index = this.indexStore.get();
     const record = index.files[change.path];
+    if (!shouldSyncPath(change.path, this.plugin.settings, this.plugin.app.vault.configDir)) return;
+    if (this.shouldKeepLocalPluginPath(change.path, undefined, localPluginIds)) return;
     if (change.deviceId && change.deviceId === this.plugin.settings.deviceId) {
       if (record) {
         record.serverRevisionId = change.fileRevisionId;
@@ -549,8 +574,42 @@ export class SyncEngine {
   private getSyncableLocalFiles(): TFile[] {
     return this.plugin.app.vault.getFiles().filter((file) => {
       const path = normalizePath(file.path);
-      return !path.startsWith(`${this.plugin.app.vault.configDir}/`) && shouldAutoSync(file, this.plugin.settings);
+      return shouldSyncFile(file, this.plugin.settings, this.plugin.app.vault.configDir) && shouldAutoSync(file, this.plugin.settings);
     });
+  }
+
+  private getLocalCommunityPluginIds(): Set<string> {
+    return collectCommunityPluginIds(
+      this.plugin.app.vault.getFiles().map((file) => normalizePath(file.path)),
+      this.plugin.app.vault.configDir
+    );
+  }
+
+  private async getRemoteCommunityPluginIdsForLocalScan(): Promise<Set<string>> {
+    if (!this.plugin.settings.syncObsidianSettings || !this.plugin.settings.syncCommunityPlugins) return new Set();
+    const snapshot = await this.getRemoteSnapshot();
+    return collectCommunityPluginIds(snapshot.files.keys(), this.plugin.app.vault.configDir);
+  }
+
+  private shouldSkipLocalPluginUpload(path: string, remotePluginIds: Set<string>, allowReplaceRemotePlugins: boolean): boolean {
+    if (!this.plugin.settings.syncObsidianSettings || !this.plugin.settings.syncCommunityPlugins) return false;
+    if (allowReplaceRemotePlugins) return false;
+    const pluginId = getCommunityPluginId(path, this.plugin.app.vault.configDir);
+    return Boolean(pluginId && remotePluginIds.has(pluginId));
+  }
+
+  private shouldKeepLocalPluginPath(path: string, remotePluginIds?: Set<string>, localPluginIds = this.getLocalCommunityPluginIds()): boolean {
+    if (!this.plugin.settings.syncObsidianSettings || !this.plugin.settings.syncCommunityPlugins) return false;
+    const pluginId = getCommunityPluginId(path, this.plugin.app.vault.configDir);
+    if (!pluginId) return false;
+    return localPluginIds.has(pluginId) && (!remotePluginIds || remotePluginIds.has(pluginId));
+  }
+
+  private shouldSkipRemotePluginDelete(path: string, allowReplaceRemotePlugins: boolean): boolean {
+    if (!this.plugin.settings.syncObsidianSettings || !this.plugin.settings.syncCommunityPlugins) return false;
+    if (allowReplaceRemotePlugins) return false;
+    const pluginId = getCommunityPluginId(path, this.plugin.app.vault.configDir);
+    return Boolean(pluginId && this.getLocalCommunityPluginIds().has(pluginId));
   }
 
   private async enqueueFile(file: TFile, type: "create" | "update", baseRevisionId: number | null, contentHash: string): Promise<void> {

@@ -138,6 +138,41 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Sync Obsidian settings")
+      .setDesc("Synchronizes selected safe files from the vault configuration folder, including core plugin state, daily notes, templates, and hotkeys.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.syncObsidianSettings).onChange(async (value) => {
+          this.plugin.settings.syncObsidianSettings = value;
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Sync community plugins")
+      .setDesc("Synchronizes community plugin folders only when a plugin with the same ID is missing on the other side.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.syncCommunityPlugins).setDisabled(!this.plugin.settings.syncObsidianSettings).onChange(async (value) => {
+          this.plugin.settings.syncCommunityPlugins = value;
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Replace remote community plugins")
+      .setDesc("During an explicit Local -> Remote link operation, local community plugin folders may replace remote folders with the same plugin ID.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.replaceRemoteCommunityPluginsWithLocal)
+          .setDisabled(!this.plugin.settings.syncObsidianSettings || !this.plugin.settings.syncCommunityPlugins)
+          .onChange(async (value) => {
+            this.plugin.settings.replaceRemoteCommunityPluginsWithLocal = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Max automatic file size")
       .setDesc("Files above this size are indexed as ignored and are not uploaded automatically.")
       .addText((text) =>

@@ -13,6 +13,9 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   vaultLinked: false,
   autoSync: true,
   syncAttachments: true,
+  syncObsidianSettings: false,
+  syncCommunityPlugins: false,
+  replaceRemoteCommunityPluginsWithLocal: false,
   maxAutoSyncFileSizeMb: 100,
   largeFileChunkSizeMb: 5,
   largeFileThresholdMb: 10
