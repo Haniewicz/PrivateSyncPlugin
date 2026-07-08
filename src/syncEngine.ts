@@ -122,16 +122,41 @@ export class SyncEngine {
   async pushQueue(): Promise<void> {
     const index = this.indexStore.get();
     if (index.queue.length === 0) return;
-    const batchOperations = [...index.queue];
+    const uploadPayloads = new Map<string, ArrayBuffer>();
+    const batchOperations: PendingOperation[] = [];
+    for (const operation of index.queue) {
+      if (operation.type === "delete") {
+        batchOperations.push(operation);
+        continue;
+      }
+      const file = this.plugin.app.vault.getAbstractFileByPath(operation.path);
+      if (!(file instanceof TFile)) continue;
+      const content = await this.plugin.app.vault.readBinary(file);
+      const contentHash = await sha256(content);
+      operation.contentHash = contentHash;
+      operation.size = content.byteLength;
+      const record = index.files[operation.path];
+      if (record) {
+        record.localHash = contentHash;
+        record.size = file.stat.size;
+        record.mtime = file.stat.mtime;
+      }
+      uploadPayloads.set(operation.clientChangeId, content);
+      batchOperations.push(operation);
+    }
+    if (batchOperations.length === 0) {
+      await this.indexStore.save();
+      return;
+    }
+    await this.indexStore.save();
     const { batchId } = await this.api.createBatch(this.plugin.settings.vaultId, batchOperations);
     for (const operation of batchOperations) {
       if (operation.type === "delete") continue;
-      const file = this.plugin.app.vault.getAbstractFileByPath(operation.path);
-      if (!(file instanceof TFile)) continue;
+      const content = uploadPayloads.get(operation.clientChangeId);
+      if (!content) continue;
       const record = index.files[operation.path];
       if (record) record.status = "uploading";
       await this.indexStore.save();
-      const content = await this.plugin.app.vault.readBinary(file);
       if (shouldUseChunkedTransfer(content.byteLength, this.plugin.settings)) {
         await this.api.uploadChunked(this.plugin.settings.vaultId, batchId, operation, content, chunkSizeBytes(this.plugin.settings));
       } else {

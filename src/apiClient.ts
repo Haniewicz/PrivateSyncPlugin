@@ -46,6 +46,7 @@ export class ApiClient {
     content: ArrayBuffer,
     chunkSize: number
   ): Promise<void> {
+    const totalChunks = Math.max(1, Math.ceil(content.byteLength / chunkSize));
     const init = await this.post<{ uploadId: string }>(
       `/api/v1/vaults/${encodeURIComponent(vaultId)}/sync-batches/${encodeURIComponent(batchId)}/chunked-upload`,
       {
@@ -53,10 +54,11 @@ export class ApiClient {
         contentHash: operation.contentHash,
         size: content.byteLength,
         chunkSize,
-        totalChunks: Math.ceil(content.byteLength / chunkSize)
+        totalChunks
       }
     );
-    for (let offset = 0, index = 0; offset < content.byteLength; offset += chunkSize, index += 1) {
+    for (let index = 0; index < totalChunks; index += 1) {
+      const offset = index * chunkSize;
       const chunk = content.slice(offset, Math.min(offset + chunkSize, content.byteLength));
       await this.request(
         `/api/v1/vaults/${encodeURIComponent(vaultId)}/sync-batches/${encodeURIComponent(batchId)}/chunked-upload/${encodeURIComponent(init.uploadId)}/chunks/${index}`,
