@@ -27,6 +27,8 @@ Na tym etapie lokalny indeks używa trwałego storage Obsidiana. SQLite warto do
 
 Każdy lokalny vault Obsidiana może wskazywać osobny server-vault. Zmiana server-vaulta w ustawieniach resetuje lokalny indeks synchronizacji, bo rewizje i kolejka zmian są przypisane do konkretnego vaulta po stronie serwera.
 
+Przed zmianą server-vaulta plugin liczy lokalny manifest plików, pyta serwer o ocenę bezpieczeństwa i dopiero wtedy decyduje o dalszym kroku. Pusty server-vault wymaga potwierdzenia uploadu `Local -> Remote`. Niepusty vault o podwyższonym ryzyku jest łączony w trybie ostrożnym: auto-sync zostaje wstrzymany, a panel synchronizacji pokazuje jawne akcje pobrania zdalnego stanu, wysłania lokalnego stanu, normalnej synchronizacji albo anulowania połączenia.
+
 ## Duże pliki i załączniki
 
 Plugin ma podstawowe zabezpieczenia przed zapychaniem synchronizacji dużymi plikami:

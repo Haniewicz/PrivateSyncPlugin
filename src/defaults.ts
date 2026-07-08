@@ -1,4 +1,5 @@
 import type { LocalIndex, PluginSettings } from "./types";
+import { uuid } from "./crypto";
 
 export const DEFAULT_SETTINGS: PluginSettings = {
   serverUrl: "http://127.0.0.1:8787",
@@ -7,7 +8,9 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   password: "",
   deviceToken: "",
   deviceId: "",
+  localVaultInstanceId: uuid(),
   vaultId: "default",
+  pendingVaultConnection: null,
   autoSync: true,
   syncAttachments: true,
   maxAutoSyncFileSizeMb: 100,

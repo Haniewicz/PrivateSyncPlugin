@@ -2,7 +2,15 @@ import { ItemView, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import { parseDevicePairingPayload } from "./pairingApprovalModal";
 import { buildLineDiff, decodeText, TextPreviewModal } from "./textPreviewModal";
 import type PrivateSyncPlugin from "./plugin";
-import type { DevicePairingRequestPayload, FileHistoryEntry, LocalFileRecord, RemoteDevice, ServerConflict, ServerRequest } from "./types";
+import type {
+  DevicePairingRequestPayload,
+  FileHistoryEntry,
+  LocalFileRecord,
+  PendingVaultConnection,
+  RemoteDevice,
+  ServerConflict,
+  ServerRequest
+} from "./types";
 
 export const PRIVATE_SYNC_VIEW = "private-sync-view";
 
@@ -68,6 +76,7 @@ export class PrivateSyncView extends ItemView {
     this.row(list, "Last applied revision", String(index.lastAppliedRevision));
     this.row(list, "Indexed files", String(files.length));
     this.row(list, "Pending operations", String(index.queue.length));
+    if (this.plugin.settings.pendingVaultConnection) this.pendingVaultConnectionRow(list, this.plugin.settings.pendingVaultConnection);
     for (const status of ["synced", "pending_upload", "conflict", "locked_by_request", "ignored", "failed"]) {
       this.row(list, status, String(files.filter((file) => file.status === status).length));
     }
@@ -207,6 +216,36 @@ export class PrivateSyncView extends ItemView {
     const row = parent.createDiv({ cls: "private-sync-row" });
     row.createDiv({ text: name });
     row.createDiv({ text: value, cls: "private-sync-muted" });
+  }
+
+  private pendingVaultConnectionRow(parent: Element, pending: PendingVaultConnection): void {
+    const row = parent.createDiv({ cls: "private-sync-row private-sync-action-row" });
+    const details = row.createDiv();
+    details.createDiv({ text: "Pending vault connection" });
+    details.createDiv({
+      text: `${pending.vaultId} · safety ${pending.riskLevel.replace("_", " ")} · local ${pending.localManifest.fileCount} files · remote ${pending.assessment.remoteFileCount} files`,
+      cls: "private-sync-muted"
+    });
+    for (const reason of pending.assessment.reasons.slice(0, 2)) {
+      details.createDiv({ text: reason, cls: "private-sync-muted" });
+    }
+    const actions = row.createDiv({ cls: "private-sync-actions" });
+    actions.createEl("button", { text: "Download remote" }).onclick = () => this.finishPendingVaultConnection("download");
+    actions.createEl("button", { text: "Upload local" }).onclick = () => this.finishPendingVaultConnection("upload");
+    actions.createEl("button", { text: "Normal sync" }).onclick = () => this.finishPendingVaultConnection("sync");
+    actions.createEl("button", { text: "Cancel" }).onclick = () => this.finishPendingVaultConnection("cancel");
+  }
+
+  private async finishPendingVaultConnection(action: "download" | "upload" | "sync" | "cancel"): Promise<void> {
+    try {
+      if (action === "download") await this.plugin.syncEngine.downloadRemoteForPendingConnection();
+      if (action === "upload") await this.plugin.syncEngine.uploadLocalForPendingConnection();
+      if (action === "sync") await this.plugin.syncEngine.runNormalSyncForPendingConnection();
+      if (action === "cancel") await this.plugin.syncEngine.cancelPendingVaultConnection();
+      this.render();
+    } catch (error) {
+      new Notice(`Private Sync vault connection failed: ${errorMessage(error)}`, 10000);
+    }
   }
 
   private requestRow(parent: Element, request: ServerRequest, payload: DevicePairingRequestPayload): void {

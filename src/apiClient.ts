@@ -1,5 +1,15 @@
 import { requestUrl, type RequestUrlParam, type RequestUrlResponse } from "obsidian";
-import type { DeviceType, FileHistoryEntry, PendingOperation, RemoteDevice, ServerChange, ServerConflict, ServerRequest, ServerVault } from "./types";
+import type {
+  DeviceType,
+  FileHistoryEntry,
+  PendingOperation,
+  RemoteDevice,
+  ServerChange,
+  ServerConflict,
+  ServerRequest,
+  ServerVault,
+  VaultConnectionAssessment
+} from "./types";
 
 type ApiRequestInit = Omit<RequestUrlParam, "url"> & { authenticated?: boolean };
 
@@ -39,6 +49,20 @@ export class ApiClient {
 
   async createVault(input: { name: string; id?: string }): Promise<ServerVault> {
     return this.post("/api/v1/vaults", input);
+  }
+
+  async assessVaultConnection(
+    vaultId: string,
+    input: { localVaultInstanceId: string; localFileCount: number; localManifestHash: string }
+  ): Promise<VaultConnectionAssessment> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/connection-assessment`, input);
+  }
+
+  async recordSyncState(
+    vaultId: string,
+    input: { localVaultInstanceId: string; localFileCount: number; localManifestHash: string }
+  ): Promise<{ ok: true; revision: number }> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/sync-state`, input);
   }
 
   async getChanges(vaultId: string, since: number): Promise<{ changes: ServerChange[] }> {

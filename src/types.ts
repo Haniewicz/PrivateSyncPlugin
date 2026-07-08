@@ -41,7 +41,7 @@ export type LocalIndex = {
   queue: PendingOperation[];
 };
 
-export type SyncEventType = "auto_merge" | "conflict" | "manual_resolution" | "offline" | "error";
+export type SyncEventType = "auto_merge" | "conflict" | "manual_resolution" | "offline" | "error" | "vault_connection";
 
 export type SyncEvent = {
   timestamp: string;
@@ -58,7 +58,9 @@ export type PluginSettings = {
   password: string;
   deviceToken: string;
   deviceId: string;
+  localVaultInstanceId: string;
   vaultId: string;
+  pendingVaultConnection: PendingVaultConnection | null;
   autoSync: boolean;
   syncAttachments: boolean;
   maxAutoSyncFileSizeMb: number;
@@ -70,6 +72,37 @@ export type ServerVault = {
   id: string;
   name: string;
   currentRevision: number;
+};
+
+export type VaultManifest = {
+  fileCount: number;
+  totalSize: number;
+  manifestHash: string;
+};
+
+export type VaultRiskLevel = "empty" | "high" | "medium" | "very_low";
+
+export type VaultConnectionAssessment = {
+  remoteFileCount: number;
+  remoteRevision: number;
+  remoteManifestHash: string;
+  previousConnection: {
+    localVaultInstanceId: string;
+    lastSyncedAt: string;
+    lastSeenRevision: number;
+    lastManifestHash: string;
+  } | null;
+  riskLevel: VaultRiskLevel;
+  reasons: string[];
+};
+
+export type PendingVaultConnection = {
+  vaultId: string;
+  previousVaultId: string;
+  riskLevel: Exclude<VaultRiskLevel, "empty">;
+  connectedAt: string;
+  localManifest: VaultManifest;
+  assessment: VaultConnectionAssessment;
 };
 
 export type ServerChange = {

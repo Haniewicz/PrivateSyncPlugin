@@ -5,6 +5,10 @@ export async function sha256(buffer: ArrayBuffer): Promise<string> {
     .join("");
 }
 
+export async function sha256Text(text: string): Promise<string> {
+  return sha256(new TextEncoder().encode(text).buffer);
+}
+
 export function uuid(): string {
   return crypto.randomUUID();
 }

@@ -5,6 +5,7 @@ import { chunkSizeBytes, shouldAutoSync, shouldUseChunkedTransfer } from "./file
 import type { LocalIndexStore } from "./localIndex";
 import type PrivateSyncPlugin from "./plugin";
 import type { PendingOperation, ServerChange } from "./types";
+import { buildLocalVaultManifest } from "./vaultManifest";
 
 export class SyncEngine {
   private running = false;
@@ -45,8 +46,12 @@ export class SyncEngine {
     }
   }
 
-  async syncNow(): Promise<void> {
+  async syncNow(options: { allowPendingConnection?: boolean } = {}): Promise<void> {
     if (this.plugin.handleOfflineSyncAttempt()) return;
+    if (this.plugin.settings.pendingVaultConnection && !options.allowPendingConnection) {
+      new Notice("Private Sync: choose how to finish the pending vault connection first.", 10000);
+      return;
+    }
     if (this.running) return;
     this.running = true;
     try {
@@ -54,10 +59,85 @@ export class SyncEngine {
       await this.pushQueue();
       await this.pullChanges();
       await this.reconcileResolvedLocalConflicts();
+      await this.recordSyncStateIfComplete();
       this.plugin.refreshView();
     } finally {
       this.running = false;
     }
+  }
+
+  async bootstrapLocalToRemote(): Promise<void> {
+    this.plugin.settings.pendingVaultConnection = null;
+    await this.plugin.saveSettings();
+    await this.indexStore.reset();
+    await this.scanLocalChanges();
+    await this.pushQueue();
+    await this.recordSyncStateIfComplete();
+    this.plugin.refreshView();
+  }
+
+  async adoptMatchingRemoteIndex(): Promise<void> {
+    const index = this.indexStore.get();
+    index.lastAppliedRevision = 0;
+    index.files = {};
+    index.queue = [];
+    const response = await this.api.getChanges(this.plugin.settings.vaultId, 0);
+    for (const change of response.changes) {
+      const file = this.plugin.app.vault.getAbstractFileByPath(change.path);
+      index.files[change.path] = {
+        path: change.path,
+        localHash: change.deleted ? null : change.contentHash,
+        size: change.deleted ? 0 : change.size,
+        mtime: file instanceof TFile ? file.stat.mtime : Date.now(),
+        serverRevisionId: change.fileRevisionId,
+        status: "synced",
+        wasSynced: true
+      };
+      index.lastAppliedRevision = Math.max(index.lastAppliedRevision, change.vaultRevision);
+    }
+    this.plugin.settings.pendingVaultConnection = null;
+    await this.plugin.saveSettings();
+    await this.indexStore.save();
+    await this.recordSyncStateIfComplete();
+    this.plugin.refreshView();
+  }
+
+  async downloadRemoteForPendingConnection(): Promise<void> {
+    if (!this.plugin.settings.pendingVaultConnection) return;
+    this.plugin.settings.pendingVaultConnection = null;
+    await this.plugin.saveSettings();
+    await this.indexStore.reset();
+    await this.pullChanges();
+    await this.recordSyncStateIfComplete();
+    this.plugin.refreshView();
+  }
+
+  async uploadLocalForPendingConnection(): Promise<void> {
+    if (!this.plugin.settings.pendingVaultConnection) return;
+    this.plugin.settings.pendingVaultConnection = null;
+    await this.plugin.saveSettings();
+    await this.indexStore.reset();
+    await this.scanLocalChanges();
+    await this.pushQueue();
+    await this.recordSyncStateIfComplete();
+    this.plugin.refreshView();
+  }
+
+  async runNormalSyncForPendingConnection(): Promise<void> {
+    if (!this.plugin.settings.pendingVaultConnection) return;
+    this.plugin.settings.pendingVaultConnection = null;
+    await this.plugin.saveSettings();
+    await this.syncNow({ allowPendingConnection: true });
+  }
+
+  async cancelPendingVaultConnection(): Promise<void> {
+    const pending = this.plugin.settings.pendingVaultConnection;
+    if (!pending) return;
+    this.plugin.settings.vaultId = pending.previousVaultId;
+    this.plugin.settings.pendingVaultConnection = null;
+    await this.plugin.saveSettings();
+    await this.indexStore.reset();
+    this.plugin.refreshView();
   }
 
   async scanLocalChanges(): Promise<void> {
@@ -564,6 +644,23 @@ export class SyncEngine {
     for (const conflict of conflicts) {
       await this.api.resolveConflict(this.plugin.settings.vaultId, conflict.id, status, decision);
     }
+  }
+
+  private async recordSyncStateIfComplete(): Promise<void> {
+    if (!this.plugin.settings.deviceToken || !this.plugin.settings.localVaultInstanceId) return;
+    const index = this.indexStore.get();
+    const incomplete = Object.values(index.files).some((record) =>
+      ["dirty_local", "pending_upload", "uploading", "uploaded_waiting_ack", "pending_download", "conflict", "locked_by_request", "deleted_local", "failed"].includes(
+        record.status
+      )
+    );
+    if (index.queue.length > 0 || incomplete) return;
+    const manifest = await buildLocalVaultManifest(this.plugin);
+    await this.api.recordSyncState(this.plugin.settings.vaultId, {
+      localVaultInstanceId: this.plugin.settings.localVaultInstanceId,
+      localFileCount: manifest.fileCount,
+      localManifestHash: manifest.manifestHash
+    });
   }
 
   private async savePairedDevice(deviceId: string, deviceToken: string): Promise<void> {

@@ -1,6 +1,8 @@
 import { App, Notice, PluginSettingTab, Setting, type DropdownComponent } from "obsidian";
 import type PrivateSyncPlugin from "./plugin";
 import type { DeviceType, ServerVault } from "./types";
+import { openVaultConnectionModal } from "./vaultConnectionModal";
+import { buildLocalVaultManifest } from "./vaultManifest";
 
 export class PrivateSyncSettingTab extends PluginSettingTab {
   private pairingPassword = "";
@@ -187,8 +189,13 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
         dropdown.addOption(this.plugin.settings.vaultId, this.plugin.settings.vaultId);
         dropdown.setValue(this.plugin.settings.vaultId);
         dropdown.onChange(async (value) => {
-          await this.selectVault(value);
-          this.display();
+          try {
+            await this.selectVault(value);
+          } catch (error) {
+            new Notice(`Private Sync: cannot switch vault: ${errorMessage(error)}`, 10000);
+          } finally {
+            this.display();
+          }
         });
         this.loadVaultOptions(dropdown).catch((error) => {
           if (this.plugin.settings.deviceToken) new Notice(`Private Sync: cannot load vaults: ${errorMessage(error)}`, 10000);
@@ -255,11 +262,65 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
 
   private async selectVault(vaultId: string): Promise<void> {
     if (!vaultId || vaultId === this.plugin.settings.vaultId) return;
+    if (!this.plugin.settings.deviceToken) throw new Error("Pair this device before switching server vaults.");
+    const previousVaultId = this.plugin.settings.vaultId;
+    const localManifest = await buildLocalVaultManifest(this.plugin);
+    const assessment = await this.plugin.api.assessVaultConnection(vaultId, {
+      localVaultInstanceId: this.plugin.settings.localVaultInstanceId,
+      localFileCount: localManifest.fileCount,
+      localManifestHash: localManifest.manifestHash
+    });
+
+    if (assessment.riskLevel === "empty") {
+      const decision = await openVaultConnectionModal(this.plugin, { vaultId, localManifest, assessment });
+      if (decision !== "bootstrap_local") return;
+      this.plugin.settings.vaultId = vaultId;
+      this.plugin.settings.pendingVaultConnection = null;
+      await this.plugin.saveSettings();
+      await this.plugin.syncEngine.bootstrapLocalToRemote();
+      new Notice(`Private Sync: uploaded local files to ${vaultId}.`, 8000);
+      return;
+    }
+
+    if (assessment.riskLevel === "high") {
+      this.plugin.settings.vaultId = vaultId;
+      this.plugin.settings.pendingVaultConnection = null;
+      await this.plugin.saveSettings();
+      await this.plugin.indexStore.reset();
+      if (localManifest.manifestHash === assessment.remoteManifestHash) {
+        await this.plugin.syncEngine.adoptMatchingRemoteIndex();
+        new Notice(`Private Sync: switched to ${vaultId}. Safety: high; manifests match.`, 8000);
+      } else {
+        this.plugin.settings.pendingVaultConnection = {
+          vaultId,
+          previousVaultId,
+          riskLevel: assessment.riskLevel,
+          connectedAt: new Date().toISOString(),
+          localManifest,
+          assessment
+        };
+        await this.plugin.saveSettings();
+        this.plugin.refreshView();
+        new Notice(`Private Sync: switched to ${vaultId}. Safety is high, but local files differ; choose the next action in the sync panel.`, 10000);
+      }
+      return;
+    }
+
+    const decision = await openVaultConnectionModal(this.plugin, { vaultId, localManifest, assessment });
+    if (decision !== "connect_cautiously") return;
     this.plugin.settings.vaultId = vaultId;
+    this.plugin.settings.pendingVaultConnection = {
+      vaultId,
+      previousVaultId,
+      riskLevel: assessment.riskLevel,
+      connectedAt: new Date().toISOString(),
+      localManifest,
+      assessment
+    };
     await this.plugin.saveSettings();
     await this.plugin.indexStore.reset();
     this.plugin.refreshView();
-    new Notice(`Private Sync: switched to server vault ${vaultId}. Local sync index was reset.`, 8000);
+    new Notice(`Private Sync: connected cautiously to ${vaultId}. Choose the next action in the sync panel.`, 10000);
   }
 }
 
