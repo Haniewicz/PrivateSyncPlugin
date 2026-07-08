@@ -95,6 +95,10 @@ export default class PrivateSyncPlugin extends Plugin {
       this.settings.localVaultInstanceId = uuid();
       await this.savePluginData({ settings: this.settings });
     }
+    if (data?.settings?.deviceToken && data.settings.vaultLinked === undefined) {
+      this.settings.vaultLinked = true;
+      await this.savePluginData({ settings: this.settings });
+    }
   }
 
   async saveSettings(): Promise<void> {
@@ -158,7 +162,7 @@ export default class PrivateSyncPlugin extends Plugin {
 
   private debouncedSync = debounce(async () => {
     if (!this.settings.deviceToken) return;
-    if (this.settings.pendingVaultConnection) return;
+    if (!this.settings.vaultLinked) return;
     if (this.handleOfflineSyncAttempt()) return;
     try {
       await this.syncEngine.syncNow();
@@ -198,10 +202,11 @@ export default class PrivateSyncPlugin extends Plugin {
     }
     this.updateConnectionStatus();
     if (!this.settings.deviceToken) return;
+    if (!this.settings.vaultLinked) return;
     if (this.handleOfflineSyncAttempt()) return;
     this.reconnectEvents();
     this.checkPairingRequests();
-    if (this.settings.autoSync && !this.settings.pendingVaultConnection) this.debouncedSync();
+    if (this.settings.autoSync) this.debouncedSync();
   }
 
   private handleAppWentInactive(): void {
@@ -217,6 +222,7 @@ export default class PrivateSyncPlugin extends Plugin {
 
   private connectEvents(): void {
     if (!this.settings.deviceToken || this.unloading) return;
+    if (!this.settings.vaultLinked) return;
     if (this.isOffline()) return;
     if (document.visibilityState === "hidden") return;
     if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) return;
@@ -227,7 +233,7 @@ export default class PrivateSyncPlugin extends Plugin {
     socket.onopen = () => {
       if (this.socket !== socket) return;
       this.checkPairingRequests();
-      if (this.settings.autoSync && !this.settings.pendingVaultConnection) this.debouncedSync();
+      if (this.settings.autoSync) this.debouncedSync();
     };
     socket.onmessage = (event) => {
       if (this.socket !== socket) return;
@@ -236,7 +242,6 @@ export default class PrivateSyncPlugin extends Plugin {
         this.checkPairingRequests();
       }
       if (message.type === "vault_changed" || message.type === "conflict_created") {
-        if (this.settings.pendingVaultConnection) return;
         if (!this.handleOfflineSyncAttempt()) {
           this.syncEngine.syncNow().catch((error) => new Notice(`Private Sync: ${error.message}`));
         }

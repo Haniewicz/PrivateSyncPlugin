@@ -2,7 +2,7 @@ import { Modal, Setting } from "obsidian";
 import type PrivateSyncPlugin from "./plugin";
 import type { VaultConnectionAssessment, VaultManifest, VaultRiskLevel } from "./types";
 
-export type VaultConnectionDecision = "cancel" | "bootstrap_local" | "connect_cautiously";
+export type VaultConnectionDecision = "cancel" | "replace_local" | "replace_remote";
 
 export function openVaultConnectionModal(
   plugin: PrivateSyncPlugin,
@@ -52,18 +52,28 @@ class VaultConnectionModal extends Modal {
     }
     for (const reason of this.input.assessment.reasons) this.row(list, "Reason", reason);
 
-    new Setting(contentEl)
-      .addButton((button) =>
-        button.setButtonText("Cancel").onClick(() => {
-          this.finish("cancel");
-        })
-      )
+    const actions = new Setting(contentEl).addButton((button) =>
+      button.setButtonText("Cancel").onClick(() => {
+        this.finish("cancel");
+      })
+    );
+
+    if (this.input.assessment.riskLevel === "empty") {
+      actions.addButton((button) => {
+        button.setButtonText("Upload local files").setCta();
+        button.onClick(() => this.finish("replace_remote"));
+      });
+      return;
+    }
+
+    actions
       .addButton((button) => {
-        if (this.input.assessment.riskLevel === "empty") {
-          button.setButtonText("Upload local files").setCta().onClick(() => this.finish("bootstrap_local"));
-        } else {
-          button.setButtonText("Connect cautiously").setCta().onClick(() => this.finish("connect_cautiously"));
-        }
+        button.setButtonText("Use server files");
+        button.onClick(() => this.finish("replace_local"));
+      })
+      .addButton((button) => {
+        button.setButtonText("Use local files");
+        button.onClick(() => this.finish("replace_remote"));
       });
   }
 
@@ -87,14 +97,14 @@ class VaultConnectionModal extends Modal {
 
 function title(riskLevel: VaultRiskLevel): string {
   if (riskLevel === "empty") return "Upload this vault to an empty server vault?";
-  return "Connect to a non-empty server vault?";
+  return "Choose how to link this server vault";
 }
 
 function description(riskLevel: VaultRiskLevel): string {
   if (riskLevel === "empty") {
-    return "The remote vault is empty. Private Sync can switch to it and upload the current local files.";
+    return "The remote vault is empty. Private Sync can upload the current local files and permanently link this local vault to it.";
   }
-  return "Private Sync will connect cautiously and pause automatic sync until you choose how to reconcile local and remote files.";
+  return "This remote vault already contains files. Review the safety assessment, then choose whether the server or local files should become the source of truth.";
 }
 
 function riskLabel(riskLevel: VaultRiskLevel): string {

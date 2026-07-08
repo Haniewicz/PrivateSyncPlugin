@@ -10,7 +10,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   deviceId: "",
   localVaultInstanceId: uuid(),
   vaultId: "default",
-  pendingVaultConnection: null,
+  vaultLinked: false,
   autoSync: true,
   syncAttachments: true,
   maxAutoSyncFileSizeMb: 100,

@@ -1,8 +1,6 @@
 import { App, Notice, PluginSettingTab, Setting, type DropdownComponent } from "obsidian";
 import type PrivateSyncPlugin from "./plugin";
 import type { DeviceType, ServerVault } from "./types";
-import { openVaultConnectionModal } from "./vaultConnectionModal";
-import { buildLocalVaultManifest } from "./vaultManifest";
 
 export class PrivateSyncSettingTab extends PluginSettingTab {
   private pairingPassword = "";
@@ -184,15 +182,16 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
   private renderVaultSettings(containerEl: HTMLElement): void {
     new Setting(containerEl)
       .setName("Server vault")
-      .setDesc(`Current server vault: ${this.plugin.settings.vaultId}`)
+      .setDesc(this.plugin.settings.vaultLinked ? `Linked to ${this.plugin.settings.vaultId}` : "Choose the server vault before linking this local vault.")
       .addDropdown((dropdown) => {
         dropdown.addOption(this.plugin.settings.vaultId, this.plugin.settings.vaultId);
         dropdown.setValue(this.plugin.settings.vaultId);
+        dropdown.setDisabled(this.plugin.settings.vaultLinked);
         dropdown.onChange(async (value) => {
           try {
             await this.selectVault(value);
           } catch (error) {
-            new Notice(`Private Sync: cannot switch vault: ${errorMessage(error)}`, 10000);
+            new Notice(`Private Sync: cannot select vault: ${errorMessage(error)}`, 10000);
           } finally {
             this.display();
           }
@@ -205,11 +204,30 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
         button.setButtonText("Refresh").onClick(() => {
           this.display();
         })
+      )
+      .addButton((button) =>
+        button
+          .setButtonText(this.plugin.settings.vaultLinked ? "Linked" : "Link")
+          .setCta()
+          .setDisabled(!this.plugin.settings.deviceToken || this.plugin.settings.vaultLinked)
+          .onClick(async () => {
+            button.setDisabled(true);
+            button.setButtonText("Checking...");
+            try {
+              await this.plugin.syncEngine.finishInitialVaultConnection();
+              this.display();
+            } catch (error) {
+              new Notice(`Private Sync: cannot link vault: ${errorMessage(error)}`, 10000);
+            } finally {
+              button.setButtonText(this.plugin.settings.vaultLinked ? "Linked" : "Link");
+              button.setDisabled(!this.plugin.settings.deviceToken || this.plugin.settings.vaultLinked);
+            }
+          })
       );
 
     new Setting(containerEl)
       .setName("Create server vault")
-      .setDesc("Creates an empty server vault and switches this Obsidian vault to it.")
+      .setDesc("Creates an empty server vault, selects it, and starts the first-link safety check.")
       .addText((text) =>
         text
           .setPlaceholder("Vault name")
@@ -219,13 +237,16 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
           })
       )
       .addButton((button) =>
-        button.setButtonText("Create").onClick(async () => {
+        button.setButtonText("Create").setDisabled(!this.plugin.settings.deviceToken || this.plugin.settings.vaultLinked).onClick(async () => {
           button.setDisabled(true);
           button.setButtonText("Creating...");
           try {
             const vault = await this.createVault();
             this.newVaultName = "";
-            new Notice(`Private Sync: switched to vault ${vault.name}.`, 8000);
+            new Notice(
+              this.plugin.settings.vaultLinked ? `Private Sync: created and linked vault ${vault.name}.` : `Private Sync: created vault ${vault.name}.`,
+              8000
+            );
             this.display();
           } catch (error) {
             new Notice(`Private Sync: cannot create vault: ${errorMessage(error)}`, 10000);
@@ -255,72 +276,20 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
     const name = this.newVaultName.trim();
     if (!name) throw new Error("Enter a vault name first.");
     if (!this.plugin.settings.deviceToken) throw new Error("Pair this device before creating server vaults.");
+    if (this.plugin.settings.vaultLinked) throw new Error("This local vault is already linked to a server vault.");
     const vault = await this.plugin.api.createVault({ name });
-    await this.selectVault(vault.id);
+    this.plugin.settings.vaultId = vault.id;
+    await this.plugin.saveSettings();
+    await this.plugin.syncEngine.finishInitialVaultConnection();
     return vault;
   }
 
   private async selectVault(vaultId: string): Promise<void> {
     if (!vaultId || vaultId === this.plugin.settings.vaultId) return;
-    if (!this.plugin.settings.deviceToken) throw new Error("Pair this device before switching server vaults.");
-    const previousVaultId = this.plugin.settings.vaultId;
-    const localManifest = await buildLocalVaultManifest(this.plugin);
-    const assessment = await this.plugin.api.assessVaultConnection(vaultId, {
-      localVaultInstanceId: this.plugin.settings.localVaultInstanceId,
-      localFileCount: localManifest.fileCount,
-      localManifestHash: localManifest.manifestHash
-    });
-
-    if (assessment.riskLevel === "empty") {
-      const decision = await openVaultConnectionModal(this.plugin, { vaultId, localManifest, assessment });
-      if (decision !== "bootstrap_local") return;
-      this.plugin.settings.vaultId = vaultId;
-      this.plugin.settings.pendingVaultConnection = null;
-      await this.plugin.saveSettings();
-      await this.plugin.syncEngine.bootstrapLocalToRemote();
-      new Notice(`Private Sync: uploaded local files to ${vaultId}.`, 8000);
-      return;
-    }
-
-    if (assessment.riskLevel === "high") {
-      this.plugin.settings.vaultId = vaultId;
-      this.plugin.settings.pendingVaultConnection = null;
-      await this.plugin.saveSettings();
-      await this.plugin.indexStore.reset();
-      if (localManifest.manifestHash === assessment.remoteManifestHash) {
-        await this.plugin.syncEngine.adoptMatchingRemoteIndex();
-        new Notice(`Private Sync: switched to ${vaultId}. Safety: high; manifests match.`, 8000);
-      } else {
-        this.plugin.settings.pendingVaultConnection = {
-          vaultId,
-          previousVaultId,
-          riskLevel: assessment.riskLevel,
-          connectedAt: new Date().toISOString(),
-          localManifest,
-          assessment
-        };
-        await this.plugin.saveSettings();
-        this.plugin.refreshView();
-        new Notice(`Private Sync: switched to ${vaultId}. Safety is high, but local files differ; choose the next action in the sync panel.`, 10000);
-      }
-      return;
-    }
-
-    const decision = await openVaultConnectionModal(this.plugin, { vaultId, localManifest, assessment });
-    if (decision !== "connect_cautiously") return;
+    if (this.plugin.settings.vaultLinked) throw new Error("This local vault is already linked to a server vault.");
     this.plugin.settings.vaultId = vaultId;
-    this.plugin.settings.pendingVaultConnection = {
-      vaultId,
-      previousVaultId,
-      riskLevel: assessment.riskLevel,
-      connectedAt: new Date().toISOString(),
-      localManifest,
-      assessment
-    };
     await this.plugin.saveSettings();
-    await this.plugin.indexStore.reset();
     this.plugin.refreshView();
-    new Notice(`Private Sync: connected cautiously to ${vaultId}. Choose the next action in the sync panel.`, 10000);
   }
 }
 

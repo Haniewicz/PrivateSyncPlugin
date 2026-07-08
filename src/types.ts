@@ -60,7 +60,7 @@ export type PluginSettings = {
   deviceId: string;
   localVaultInstanceId: string;
   vaultId: string;
-  pendingVaultConnection: PendingVaultConnection | null;
+  vaultLinked: boolean;
   autoSync: boolean;
   syncAttachments: boolean;
   maxAutoSyncFileSizeMb: number;
@@ -94,15 +94,6 @@ export type VaultConnectionAssessment = {
   } | null;
   riskLevel: VaultRiskLevel;
   reasons: string[];
-};
-
-export type PendingVaultConnection = {
-  vaultId: string;
-  previousVaultId: string;
-  riskLevel: Exclude<VaultRiskLevel, "empty">;
-  connectedAt: string;
-  localManifest: VaultManifest;
-  assessment: VaultConnectionAssessment;
 };
 
 export type ServerChange = {

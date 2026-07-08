@@ -5,7 +5,13 @@ import { chunkSizeBytes, shouldAutoSync, shouldUseChunkedTransfer } from "./file
 import type { LocalIndexStore } from "./localIndex";
 import type PrivateSyncPlugin from "./plugin";
 import type { PendingOperation, ServerChange } from "./types";
+import { openVaultConnectionModal } from "./vaultConnectionModal";
 import { buildLocalVaultManifest } from "./vaultManifest";
+
+type RemoteSnapshot = {
+  files: Map<string, ServerChange>;
+  latestRevision: number;
+};
 
 export class SyncEngine {
   private running = false;
@@ -46,10 +52,10 @@ export class SyncEngine {
     }
   }
 
-  async syncNow(options: { allowPendingConnection?: boolean } = {}): Promise<void> {
+  async syncNow(): Promise<void> {
     if (this.plugin.handleOfflineSyncAttempt()) return;
-    if (this.plugin.settings.pendingVaultConnection && !options.allowPendingConnection) {
-      new Notice("Private Sync: choose how to finish the pending vault connection first.", 10000);
+    if (!this.plugin.settings.vaultLinked) {
+      new Notice("Private Sync: choose and link a server vault before syncing.", 10000);
       return;
     }
     if (this.running) return;
@@ -67,7 +73,6 @@ export class SyncEngine {
   }
 
   async bootstrapLocalToRemote(): Promise<void> {
-    this.plugin.settings.pendingVaultConnection = null;
     await this.plugin.saveSettings();
     await this.indexStore.reset();
     await this.scanLocalChanges();
@@ -95,48 +100,135 @@ export class SyncEngine {
       };
       index.lastAppliedRevision = Math.max(index.lastAppliedRevision, change.vaultRevision);
     }
-    this.plugin.settings.pendingVaultConnection = null;
-    await this.plugin.saveSettings();
     await this.indexStore.save();
     await this.recordSyncStateIfComplete();
     this.plugin.refreshView();
   }
 
-  async downloadRemoteForPendingConnection(): Promise<void> {
-    if (!this.plugin.settings.pendingVaultConnection) return;
-    this.plugin.settings.pendingVaultConnection = null;
-    await this.plugin.saveSettings();
+  async finishInitialVaultConnection(): Promise<void> {
+    const manifest = await buildLocalVaultManifest(this.plugin);
+    const assessment = await this.api.assessVaultConnection(this.plugin.settings.vaultId, {
+      localVaultInstanceId: this.plugin.settings.localVaultInstanceId,
+      localFileCount: manifest.fileCount,
+      localManifestHash: manifest.manifestHash
+    });
+    if (assessment.riskLevel === "empty") {
+      const decision = await openVaultConnectionModal(this.plugin, {
+        vaultId: this.plugin.settings.vaultId,
+        localManifest: manifest,
+        assessment
+      });
+      if (decision !== "replace_remote") {
+        new Notice("Private Sync: paired, but initial upload was cancelled.", 10000);
+        return;
+      }
+      await this.replaceRemoteWithLocal();
+      this.plugin.settings.vaultLinked = true;
+      await this.plugin.saveSettings();
+      new Notice("Private Sync: local files uploaded to the empty server vault.", 10000);
+      return;
+    }
+
+    const decision = await openVaultConnectionModal(this.plugin, {
+      vaultId: this.plugin.settings.vaultId,
+      localManifest: manifest,
+      assessment
+    });
+    if (decision === "replace_local") {
+      await this.replaceLocalWithRemote();
+      this.plugin.settings.vaultLinked = true;
+      await this.plugin.saveSettings();
+      new Notice("Private Sync: local files replaced with the server vault state.", 10000);
+      return;
+    }
+    if (decision === "replace_remote") {
+      await this.replaceRemoteWithLocal();
+      this.plugin.settings.vaultLinked = true;
+      await this.plugin.saveSettings();
+      new Notice("Private Sync: server vault replaced with the local state.", 10000);
+      return;
+    }
+    new Notice("Private Sync: paired, but vault linking was cancelled.", 10000);
+  }
+
+  async replaceLocalWithRemote(): Promise<void> {
+    const snapshot = await this.getRemoteSnapshot();
     await this.indexStore.reset();
+    const index = this.indexStore.get();
+    const remotePaths = new Set(snapshot.files.keys());
+
+    for (const file of this.getSyncableLocalFiles()) {
+      const path = normalizePath(file.path);
+      if (!remotePaths.has(path)) {
+        await this.plugin.app.fileManager.trashFile(file);
+      }
+    }
+
+    for (const change of [...snapshot.files.values()].sort((left, right) => left.path.localeCompare(right.path))) {
+      const content = shouldUseChunkedTransfer(change.size, this.plugin.settings)
+        ? await this.api.downloadChunked(this.plugin.settings.vaultId, change.path, change.size, chunkSizeBytes(this.plugin.settings))
+        : await this.api.download(this.plugin.settings.vaultId, change.path);
+      await this.writeFile(change.path, content);
+      index.files[change.path] = {
+        path: change.path,
+        localHash: change.contentHash,
+        size: change.size,
+        mtime: Date.now(),
+        serverRevisionId: change.fileRevisionId,
+        status: "synced",
+        wasSynced: true
+      };
+    }
+    index.lastAppliedRevision = snapshot.latestRevision;
+    index.queue = [];
+    await this.indexStore.save();
+    await this.recordSyncStateIfComplete();
+    this.plugin.refreshView();
+  }
+
+  async replaceRemoteWithLocal(): Promise<void> {
+    const snapshot = await this.getRemoteSnapshot();
+    await this.indexStore.reset();
+    const index = this.indexStore.get();
+    const seen = new Set<string>();
+
+    for (const file of this.getSyncableLocalFiles()) {
+      const path = normalizePath(file.path);
+      seen.add(path);
+      const content = await this.plugin.app.vault.readBinary(file);
+      const localHash = await sha256(content);
+      const remote = snapshot.files.get(path);
+      const isAlreadySynced = remote?.contentHash === localHash && remote.size === file.stat.size;
+      index.files[path] = {
+        path,
+        localHash,
+        size: file.stat.size,
+        mtime: file.stat.mtime,
+        serverRevisionId: remote?.fileRevisionId ?? null,
+        status: isAlreadySynced ? "synced" : "dirty_local",
+        wasSynced: isAlreadySynced
+      };
+      if (!isAlreadySynced) {
+        await this.enqueueFile(file, remote ? "update" : "create", remote?.fileRevisionId ?? null, localHash);
+      }
+    }
+
+    for (const [path, remote] of snapshot.files) {
+      if (seen.has(path)) continue;
+      await this.indexStore.enqueue({
+        clientChangeId: uuid(),
+        type: "delete",
+        path,
+        baseRevisionId: remote.fileRevisionId,
+        detectedAt: new Date().toISOString()
+      });
+    }
+
+    index.lastAppliedRevision = snapshot.latestRevision;
+    await this.indexStore.save();
+    await this.pushQueue();
     await this.pullChanges();
     await this.recordSyncStateIfComplete();
-    this.plugin.refreshView();
-  }
-
-  async uploadLocalForPendingConnection(): Promise<void> {
-    if (!this.plugin.settings.pendingVaultConnection) return;
-    this.plugin.settings.pendingVaultConnection = null;
-    await this.plugin.saveSettings();
-    await this.indexStore.reset();
-    await this.scanLocalChanges();
-    await this.pushQueue();
-    await this.recordSyncStateIfComplete();
-    this.plugin.refreshView();
-  }
-
-  async runNormalSyncForPendingConnection(): Promise<void> {
-    if (!this.plugin.settings.pendingVaultConnection) return;
-    this.plugin.settings.pendingVaultConnection = null;
-    await this.plugin.saveSettings();
-    await this.syncNow({ allowPendingConnection: true });
-  }
-
-  async cancelPendingVaultConnection(): Promise<void> {
-    const pending = this.plugin.settings.pendingVaultConnection;
-    if (!pending) return;
-    this.plugin.settings.vaultId = pending.previousVaultId;
-    this.plugin.settings.pendingVaultConnection = null;
-    await this.plugin.saveSettings();
-    await this.indexStore.reset();
     this.plugin.refreshView();
   }
 
@@ -439,6 +531,28 @@ export class SyncEngine {
     };
   }
 
+  private async getRemoteSnapshot(): Promise<RemoteSnapshot> {
+    const response = await this.api.getChanges(this.plugin.settings.vaultId, 0);
+    const files = new Map<string, ServerChange>();
+    let latestRevision = 0;
+    for (const change of response.changes) {
+      latestRevision = Math.max(latestRevision, change.vaultRevision);
+      if (change.deleted) {
+        files.delete(change.path);
+      } else {
+        files.set(change.path, change);
+      }
+    }
+    return { files, latestRevision };
+  }
+
+  private getSyncableLocalFiles(): TFile[] {
+    return this.plugin.app.vault.getFiles().filter((file) => {
+      const path = normalizePath(file.path);
+      return !path.startsWith(`${this.plugin.app.vault.configDir}/`) && shouldAutoSync(file, this.plugin.settings);
+    });
+  }
+
   private async enqueueFile(file: TFile, type: "create" | "update", baseRevisionId: number | null, contentHash: string): Promise<void> {
     await this.indexStore.enqueue({
       clientChangeId: uuid(),
@@ -668,8 +782,9 @@ export class SyncEngine {
     settings.deviceId = deviceId;
     settings.deviceToken = deviceToken;
     settings.password = "";
+    settings.vaultLinked = false;
     await this.plugin.saveSettings();
-    new Notice("Private Sync: device paired.", 8000);
+    new Notice("Private Sync: device paired. Choose and link a server vault.", 10000);
   }
 
   private async waitForPairingApproval(requestId: string, password: string): Promise<void> {

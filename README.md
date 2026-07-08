@@ -20,14 +20,14 @@ Skopiuj `manifest.json`, `main.js` i `styles.css` do folderu pluginu w vaultcie 
 - offline queue z `client_change_id`,
 - batch upload do serwera,
 - pobieranie zmian od `last_applied_revision`,
-- wybór i tworzenie server-vaultów po sparowaniu urządzenia,
+- wybór albo tworzenie server-vaulta przed trwałym powiązaniem lokalnego vaulta,
 - widok boczny: Status, Urządzenia, Konflikty, Historia.
 
 Na tym etapie lokalny indeks używa trwałego storage Obsidiana. SQLite warto dodać jako kolejny krok dla dużych vaultów.
 
-Każdy lokalny vault Obsidiana może wskazywać osobny server-vault. Zmiana server-vaulta w ustawieniach resetuje lokalny indeks synchronizacji, bo rewizje i kolejka zmian są przypisane do konkretnego vaulta po stronie serwera.
+Każdy lokalny vault Obsidiana wskazuje jeden stały server-vault. Po powiązaniu lokalnego vaulta wybór server-vaulta jest blokowany, żeby uniknąć przypadkowego mieszania lub nadpisywania plików między różnymi vaultami.
 
-Przed zmianą server-vaulta plugin liczy lokalny manifest plików, pyta serwer o ocenę bezpieczeństwa i dopiero wtedy decyduje o dalszym kroku. Pusty server-vault wymaga potwierdzenia uploadu `Local -> Remote`. Niepusty vault o podwyższonym ryzyku jest łączony w trybie ostrożnym: auto-sync zostaje wstrzymany, a panel synchronizacji pokazuje jawne akcje pobrania zdalnego stanu, wysłania lokalnego stanu, normalnej synchronizacji albo anulowania połączenia.
+Przy pierwszym powiązaniu plugin liczy lokalny manifest plików i pyta serwer o ocenę bezpieczeństwa. Pusty server-vault wymaga potwierdzenia uploadu `Local -> Remote`. Niepusty server-vault pokazuje ocenę ryzyka i wymaga jawnej decyzji: `Remote -> Local`, `Local -> Remote` albo anulowanie. Po powiązaniu normalny sync działa już tylko z tym jednym server-vaultem.
 
 ## Duże pliki i załączniki
 
