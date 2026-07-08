@@ -2,10 +2,11 @@ import { Notice, Plugin, TFile, WorkspaceLeaf } from "obsidian";
 import { ApiClient } from "./apiClient";
 import { DEFAULT_INDEX, DEFAULT_SETTINGS } from "./defaults";
 import { LocalIndexStore } from "./localIndex";
+import { PairingApprovalModal, parseDevicePairingPayload } from "./pairingApprovalModal";
 import { PrivateSyncSettingTab } from "./settingsTab";
 import { SyncEngine } from "./syncEngine";
 import { PRIVATE_SYNC_VIEW, PrivateSyncView } from "./statusView";
-import type { LocalIndex, PluginSettings } from "./types";
+import type { LocalIndex, PluginSettings, ServerRequest } from "./types";
 
 type StoredData = {
   settings?: Partial<PluginSettings>;
@@ -19,6 +20,7 @@ export default class PrivateSyncPlugin extends Plugin {
   syncEngine = new SyncEngine(this, this.indexStore, this.api);
   private socket: WebSocket | null = null;
   private reconnectTimeout: number | null = null;
+  private activePairingRequestModals = new Set<string>();
   private unloading = false;
 
   async onload(): Promise<void> {
@@ -44,6 +46,11 @@ export default class PrivateSyncPlugin extends Plugin {
       id: "private-sync-open-panel",
       name: "Open sync panel",
       callback: () => this.activateView()
+    });
+    this.addCommand({
+      id: "private-sync-check-pairing-requests",
+      name: "Check pairing requests",
+      callback: () => this.checkPairingRequests()
     });
 
     this.registerEvent(
@@ -94,6 +101,19 @@ export default class PrivateSyncPlugin extends Plugin {
     }
   }
 
+  async checkPairingRequests(): Promise<void> {
+    if (!this.settings.deviceToken || !this.settings.vaultId) return;
+    try {
+      const response = await this.api.requests(this.settings.vaultId);
+      for (const request of response.requests) {
+        this.maybeOpenPairingApproval(request);
+      }
+      this.refreshView();
+    } catch (error) {
+      new Notice(`Private Sync: cannot load pairing requests: ${(error as Error).message}`, 10000);
+    }
+  }
+
   private recreateApi(): void {
     this.api = new ApiClient(this.settings.serverUrl, () => this.settings.deviceToken);
     this.syncEngine = new SyncEngine(this, this.indexStore, this.api);
@@ -133,9 +153,10 @@ export default class PrivateSyncPlugin extends Plugin {
   }
 
   private handleAppBecameActive(_reason: string): void {
-    if (!this.settings.autoSync || !this.settings.deviceToken) return;
+    if (!this.settings.deviceToken) return;
     this.reconnectEvents();
-    this.debouncedSync();
+    this.checkPairingRequests();
+    if (this.settings.autoSync) this.debouncedSync();
   }
 
   private handleAppWentInactive(): void {
@@ -159,12 +180,16 @@ export default class PrivateSyncPlugin extends Plugin {
     this.socket = socket;
     socket.onopen = () => {
       if (this.socket !== socket) return;
-      this.debouncedSync();
+      this.checkPairingRequests();
+      if (this.settings.autoSync) this.debouncedSync();
     };
     socket.onmessage = (event) => {
       if (this.socket !== socket) return;
       const message = parseServerEvent(event.data);
-      if (message.type === "vault_changed" || message.type === "request_created" || message.type === "conflict_created") {
+      if (message.type === "request_created") {
+        this.checkPairingRequests();
+      }
+      if (message.type === "vault_changed" || message.type === "conflict_created") {
         this.syncEngine.syncNow().catch((error) => new Notice(`Private Sync: ${error.message}`));
       }
       this.refreshView();
@@ -205,6 +230,17 @@ export default class PrivateSyncPlugin extends Plugin {
     socket.onerror = null;
     socket.close();
     this.socket = null;
+  }
+
+  private maybeOpenPairingApproval(request: ServerRequest): void {
+    if (request.type !== "device_pairing" || request.status !== "pending") return;
+    if (this.activePairingRequestModals.has(request.id)) return;
+    const payload = parseDevicePairingPayload(request);
+    if (!payload) return;
+    this.activePairingRequestModals.add(request.id);
+    new PairingApprovalModal(this, request, payload, () => {
+      this.activePairingRequestModals.delete(request.id);
+    }).open();
   }
 }
 

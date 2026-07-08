@@ -49,3 +49,7 @@
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
 }
+
+.private-sync-request-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}

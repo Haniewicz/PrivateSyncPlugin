@@ -35,13 +35,12 @@ export class SyncEngine {
       recoveryPairingCode: input.recoveryPairingCode
     });
     if (response.status === "approved") {
-      settings.deviceId = response.deviceId;
-      settings.deviceToken = response.deviceToken;
-      settings.password = "";
-      await this.plugin.saveSettings();
-      new Notice("Private Sync: device paired.");
+      await this.savePairedDevice(response.deviceId, response.deviceToken);
     } else {
-      new Notice(`Private Sync: pairing request pending (${response.requestId}).`);
+      new Notice(`Private Sync: pairing request pending (${response.requestId}). Waiting for approval.`, 10000);
+      this.waitForPairingApproval(response.requestId, password).catch((error) => {
+        new Notice(`Private Sync pairing failed: ${(error as Error).message}`, 10000);
+      });
     }
   }
 
@@ -260,4 +259,33 @@ export class SyncEngine {
     if (parent) await this.plugin.app.vault.createFolder(parent).catch(() => undefined);
     await this.plugin.app.vault.createBinary(path, content);
   }
+
+  private async savePairedDevice(deviceId: string, deviceToken: string): Promise<void> {
+    const settings = this.plugin.settings;
+    settings.deviceId = deviceId;
+    settings.deviceToken = deviceToken;
+    settings.password = "";
+    await this.plugin.saveSettings();
+    new Notice("Private Sync: device paired.", 8000);
+  }
+
+  private async waitForPairingApproval(requestId: string, password: string): Promise<void> {
+    const attempts = 150;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      await sleep(2000);
+      const response = await this.api.deviceRequestStatus(requestId, password);
+      if (response.status === "approved") {
+        await this.savePairedDevice(response.deviceId, response.deviceToken);
+        return;
+      }
+      if (response.status !== "pending") {
+        throw new Error(`Pairing request ended with status: ${response.status}.`);
+      }
+    }
+    new Notice("Private Sync: pairing request is still pending. Try pairing again or use a recovery pairing code.", 10000);
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }

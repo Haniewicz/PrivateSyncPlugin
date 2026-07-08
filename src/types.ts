@@ -66,3 +66,20 @@ export type ServerChange = {
   encrypted: number;
   createdAt: string;
 };
+
+export type DevicePairingRequestPayload = {
+  deviceName: string;
+  deviceType: DeviceType;
+  requestedAt?: string;
+  ip?: string;
+};
+
+export type ServerRequest = {
+  id: string;
+  type: "device_pairing" | string;
+  status: "pending" | "approved" | "rejected" | "resolved" | "expired" | string;
+  payload_json?: string;
+  payloadJson?: string;
+  created_at?: string;
+  createdAt?: string;
+};

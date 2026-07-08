@@ -1,5 +1,5 @@
 import { requestUrl, type RequestUrlParam, type RequestUrlResponse } from "obsidian";
-import type { DeviceType, PendingOperation, ServerChange } from "./types";
+import type { DeviceType, PendingOperation, ServerChange, ServerRequest } from "./types";
 
 type ApiRequestInit = Omit<RequestUrlParam, "url"> & { authenticated?: boolean };
 
@@ -21,6 +21,16 @@ export class ApiClient {
     recoveryPairingCode?: string;
   }): Promise<{ status: "approved"; deviceId: string; deviceToken: string } | { status: "pending"; requestId: string }> {
     return this.post("/api/v1/devices/request", input, false);
+  }
+
+  async deviceRequestStatus(
+    requestId: string,
+    password: string
+  ): Promise<
+    | { status: "approved"; deviceId: string; deviceToken: string }
+    | { status: "pending" | "rejected" | "resolved" | "expired" }
+  > {
+    return this.post(`/api/v1/devices/request/${encodeURIComponent(requestId)}/status`, { password }, false);
   }
 
   async getVaults(): Promise<{ vaults: Array<{ id: string; name: string; currentRevision: number }> }> {
@@ -114,7 +124,15 @@ export class ApiClient {
     return this.get("/api/v1/devices");
   }
 
-  async requests(vaultId: string): Promise<{ requests: unknown[] }> {
+  async approveDeviceRequest(input: {
+    requestId: string;
+    deviceName: string;
+    deviceType: DeviceType;
+  }): Promise<{ status: "approved"; deviceId: string; deviceToken: string }> {
+    return this.post("/api/v1/devices/approve", input);
+  }
+
+  async requests(vaultId: string): Promise<{ requests: ServerRequest[] }> {
     return this.get(`/api/v1/vaults/${encodeURIComponent(vaultId)}/requests`);
   }
 
