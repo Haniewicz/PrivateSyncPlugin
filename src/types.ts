@@ -81,6 +81,10 @@ export type ServerRequest = {
   status: "pending" | "approved" | "rejected" | "resolved" | "expired" | string;
   payload_json?: string;
   payloadJson?: string;
+  decision_json?: string | null;
+  decisionJson?: string | null;
+  created_by_device_id?: string | null;
+  createdByDeviceId?: string | null;
   created_at?: string;
   createdAt?: string;
 };

@@ -79,3 +79,18 @@
 .private-sync-status-bar.is-offline {
   color: var(--text-warning);
 }
+
+.private-sync-preview-modal {
+  max-width: min(960px, 90vw);
+}
+
+.private-sync-preview {
+  max-height: 65vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 8px;
+  background: var(--background-secondary);
+}

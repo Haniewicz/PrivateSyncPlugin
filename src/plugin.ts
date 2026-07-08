@@ -215,6 +215,14 @@ export default class PrivateSyncPlugin extends Plugin {
       if (message.type === "conflict_resolved") {
         this.refreshView();
       }
+      if (
+        message.type === "request_resolved" ||
+        message.type === "device_revoked" ||
+        message.type === "device_restored" ||
+        message.type === "device_deleted"
+      ) {
+        this.refreshView();
+      }
       this.refreshView();
     };
     socket.onclose = () => {

@@ -128,6 +128,14 @@ export class ApiClient {
     return this.post("/api/v1/devices/revoke", { deviceId });
   }
 
+  async restoreDevice(deviceId: string): Promise<{ ok: true }> {
+    return this.post("/api/v1/devices/restore", { deviceId });
+  }
+
+  async deleteDevice(deviceId: string): Promise<{ ok: true }> {
+    return this.post("/api/v1/devices/delete", { deviceId });
+  }
+
   async approveDeviceRequest(input: {
     requestId: string;
     deviceName: string;
@@ -138,6 +146,13 @@ export class ApiClient {
 
   async requests(vaultId: string): Promise<{ requests: ServerRequest[] }> {
     return this.get(`/api/v1/vaults/${encodeURIComponent(vaultId)}/requests`);
+  }
+
+  async resolveRequest(vaultId: string, requestId: string, status: "approved" | "rejected" | "resolved", decision: unknown): Promise<{ ok: true; batch?: unknown }> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/requests/${encodeURIComponent(requestId)}/resolve`, {
+      status,
+      decision
+    });
   }
 
   async conflicts(vaultId: string): Promise<{ conflicts: ServerConflict[] }> {
@@ -153,6 +168,17 @@ export class ApiClient {
 
   async history(vaultId: string, path: string): Promise<{ history: FileHistoryEntry[] }> {
     return this.get(`/api/v1/vaults/${encodeURIComponent(vaultId)}/files/history?path=${encodeURIComponent(path)}`);
+  }
+
+  async downloadRevision(vaultId: string, revisionId: number): Promise<ArrayBuffer> {
+    const response = await this.request(
+      `/api/v1/vaults/${encodeURIComponent(vaultId)}/files/revisions/${encodeURIComponent(String(revisionId))}/download`
+    );
+    return response.arrayBuffer;
+  }
+
+  async restoreRevision(vaultId: string, revisionId: number): Promise<{ ok: true; revision: number; path: string }> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/files/revisions/${encodeURIComponent(String(revisionId))}/restore`, {});
   }
 
   private async get<T>(path: string): Promise<T> {

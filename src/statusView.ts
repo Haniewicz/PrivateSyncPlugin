@@ -1,5 +1,6 @@
-import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import { parseDevicePairingPayload } from "./pairingApprovalModal";
+import { buildLineDiff, decodeText, TextPreviewModal } from "./textPreviewModal";
 import type PrivateSyncPlugin from "./plugin";
 import type { DevicePairingRequestPayload, FileHistoryEntry, LocalFileRecord, RemoteDevice, ServerConflict, ServerRequest } from "./types";
 
@@ -120,17 +121,21 @@ export class PrivateSyncView extends ItemView {
       .requests(this.plugin.settings.vaultId)
       .then((response) => {
         list.empty();
-        const pairingRequests = response.requests.filter((request) => request.type === "device_pairing" && request.status === "pending");
-        if (pairingRequests.length === 0) {
+        const pendingRequests = response.requests.filter((request) => request.status === "pending");
+        if (pendingRequests.length === 0) {
           this.row(list, "Status", "no pending requests");
           return;
         }
-        for (const request of pairingRequests) {
-          const payload = parseDevicePairingPayload(request);
-          if (payload) {
-            this.requestRow(list, request, payload);
+        for (const request of pendingRequests) {
+          if (request.type === "device_pairing") {
+            const payload = parseDevicePairingPayload(request);
+            if (payload) {
+              this.requestRow(list, request, payload);
+            } else {
+              this.row(list, request.id, "invalid pairing payload");
+            }
           } else {
-            this.row(list, request.id, "invalid pairing payload");
+            this.decisionRequestRow(list, request);
           }
         }
       })
@@ -221,19 +226,39 @@ export class PrivateSyncView extends ItemView {
       text: `${device.type} · ${device.revoked_at ? "revoked" : "trusted"} · last seen ${device.last_seen_at ?? "never"}`,
       cls: "private-sync-muted"
     });
-    const revoke = row.createEl("button", { text: "Revoke" });
-    revoke.disabled = Boolean(device.revoked_at) || device.id === this.plugin.settings.deviceId;
-    revoke.onclick = async () => {
-      revoke.disabled = true;
-      revoke.textContent = "Revoking...";
+    const toggle = row.createEl("button", { text: device.revoked_at ? "Restore" : "Revoke" });
+    toggle.disabled = device.id === this.plugin.settings.deviceId;
+    toggle.onclick = async () => {
+      toggle.disabled = true;
+      toggle.textContent = device.revoked_at ? "Restoring..." : "Revoking...";
       try {
-        await this.plugin.api.revokeDevice(device.id);
-        new Notice(`Private Sync: revoked ${device.name}.`, 8000);
+        if (device.revoked_at) {
+          await this.plugin.api.restoreDevice(device.id);
+          new Notice(`Private Sync: restored ${device.name}.`, 8000);
+        } else {
+          await this.plugin.api.revokeDevice(device.id);
+          new Notice(`Private Sync: revoked ${device.name}.`, 8000);
+        }
         this.render();
       } catch (error) {
-        new Notice(`Private Sync revoke failed: ${errorMessage(error)}`, 10000);
-        revoke.disabled = false;
-        revoke.textContent = "Revoke";
+        new Notice(`Private Sync device update failed: ${errorMessage(error)}`, 10000);
+        toggle.disabled = false;
+        toggle.textContent = device.revoked_at ? "Restore" : "Revoke";
+      }
+    };
+    const remove = row.createEl("button", { text: "Delete" });
+    remove.disabled = device.id === this.plugin.settings.deviceId;
+    remove.onclick = async () => {
+      remove.disabled = true;
+      remove.textContent = "Deleting...";
+      try {
+        await this.plugin.api.deleteDevice(device.id);
+        new Notice(`Private Sync: deleted ${device.name}.`, 8000);
+        this.render();
+      } catch (error) {
+        new Notice(`Private Sync device delete failed: ${errorMessage(error)}`, 10000);
+        remove.disabled = false;
+        remove.textContent = "Delete";
       }
     };
   }
@@ -244,6 +269,7 @@ export class PrivateSyncView extends ItemView {
     details.createDiv({ text: conflict.path });
     details.createDiv({ text: conflict.status, cls: "private-sync-muted" });
     const actions = row.createDiv({ cls: "private-sync-actions" });
+    actions.createEl("button", { text: "Diff" }).onclick = () => this.showConflictDiff(conflict.path);
     actions.createEl("button", { text: "Keep local" }).onclick = () => this.resolveConflict(conflict.path, "keep_local");
     actions.createEl("button", { text: "Use server" }).onclick = () => this.resolveConflict(conflict.path, "use_server");
   }
@@ -267,12 +293,73 @@ export class PrivateSyncView extends ItemView {
   }
 
   private historyRow(parent: Element, entry: FileHistoryEntry): void {
-    const row = parent.createDiv({ cls: "private-sync-row" });
-    row.createDiv({ text: `Revision ${entry.vaultRevision}` });
-    row.createDiv({
+    const row = parent.createDiv({ cls: "private-sync-row private-sync-action-row" });
+    const details = row.createDiv();
+    details.createDiv({ text: `Revision ${entry.vaultRevision}` });
+    details.createDiv({
       text: `${entry.deleted ? "deleted" : `${entry.size} B`} · ${entry.createdAt}`,
       cls: "private-sync-muted"
     });
+    const actions = row.createDiv({ cls: "private-sync-actions" });
+    const preview = actions.createEl("button", { text: "Preview" });
+    preview.disabled = Boolean(entry.deleted);
+    preview.onclick = () => this.previewRevision(entry);
+    actions.createEl("button", { text: "Restore" }).onclick = () => this.restoreRevision(entry);
+  }
+
+  private decisionRequestRow(parent: Element, request: ServerRequest): void {
+    const row = parent.createDiv({ cls: "private-sync-row private-sync-action-row" });
+    const details = row.createDiv();
+    details.createDiv({ text: requestLabel(request.type) });
+    details.createDiv({ text: requestPayloadSummary(request), cls: "private-sync-muted" });
+    const actions = row.createDiv({ cls: "private-sync-actions" });
+    actions.createEl("button", { text: "Details" }).onclick = () => {
+      new TextPreviewModal(this.plugin, requestLabel(request.type), requestPayloadPretty(request)).open();
+    };
+    actions.createEl("button", { text: "Approve" }).onclick = () => this.resolveRequest(request, "approved");
+    actions.createEl("button", { text: "Reject" }).onclick = () => this.resolveRequest(request, "rejected");
+  }
+
+  private async resolveRequest(request: ServerRequest, status: "approved" | "rejected"): Promise<void> {
+    try {
+      await this.plugin.api.resolveRequest(this.plugin.settings.vaultId, request.id, status, { decidedIn: "plugin" });
+      new Notice(`Private Sync: request ${status}.`, 8000);
+      await this.plugin.syncEngine.syncNow();
+      this.render();
+    } catch (error) {
+      new Notice(`Private Sync request update failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
+  private async showConflictDiff(path: string): Promise<void> {
+    try {
+      const localFile = this.plugin.app.vault.getAbstractFileByPath(path);
+      const local = localFile instanceof TFile ? decodeText(await this.plugin.app.vault.readBinary(localFile)) : "";
+      const server = decodeText(await this.plugin.api.download(this.plugin.settings.vaultId, path));
+      new TextPreviewModal(this.plugin, `Diff: ${path}`, buildLineDiff("Local", local, "Server", server)).open();
+    } catch (error) {
+      new Notice(`Private Sync diff failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
+  private async previewRevision(entry: FileHistoryEntry): Promise<void> {
+    try {
+      const content = decodeText(await this.plugin.api.downloadRevision(this.plugin.settings.vaultId, entry.id));
+      new TextPreviewModal(this.plugin, `Revision ${entry.vaultRevision}: ${this.historyPath}`, content).open();
+    } catch (error) {
+      new Notice(`Private Sync preview failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
+  private async restoreRevision(entry: FileHistoryEntry): Promise<void> {
+    try {
+      await this.plugin.api.restoreRevision(this.plugin.settings.vaultId, entry.id);
+      new Notice(`Private Sync: restored revision ${entry.vaultRevision}.`, 8000);
+      await this.plugin.syncEngine.syncNow();
+      this.render();
+    } catch (error) {
+      new Notice(`Private Sync restore failed: ${errorMessage(error)}`, 10000);
+    }
   }
 }
 
@@ -282,4 +369,48 @@ function label(tab: Tab): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function requestLabel(type: string): string {
+  if (type === "mass_delete_approval") return "Mass delete approval";
+  if (type === "suspicious_operation") return "Suspicious operation";
+  if (type === "conflict_resolution") return "Conflict resolution";
+  if (type === "restore_version") return "Restore version";
+  return type;
+}
+
+function requestPayloadSummary(request: ServerRequest): string {
+  const payload = parseRequestPayload(request);
+  if (!payload) return request.createdAt ?? request.created_at ?? "pending";
+  const parts = [];
+  if (typeof payload.operationCount === "number") parts.push(`${payload.operationCount} operations`);
+  if (typeof payload.deleteCount === "number") parts.push(`${payload.deleteCount} deletes`);
+  if (typeof payload.emptyWrites === "number") parts.push(`${payload.emptyWrites} empty writes`);
+  if (typeof payload.batchId === "string") parts.push(`batch ${payload.batchId}`);
+  return parts.join(" · ") || request.createdAt || request.created_at || "pending";
+}
+
+function requestPayloadPretty(request: ServerRequest): string {
+  const payload = parseRequestPayload(request);
+  return JSON.stringify(
+    {
+      id: request.id,
+      type: request.type,
+      createdAt: request.createdAt ?? request.created_at,
+      createdByDeviceId: request.createdByDeviceId ?? request.created_by_device_id,
+      payload
+    },
+    null,
+    2
+  );
+}
+
+function parseRequestPayload(request: ServerRequest): Record<string, unknown> | null {
+  const raw = request.payloadJson ?? request.payload_json;
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
 }
