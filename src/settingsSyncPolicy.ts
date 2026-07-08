@@ -1,28 +1,7 @@
 import { normalizePath, type TFile } from "obsidian";
 import type { PluginSettings } from "./types";
 
-const CORE_SETTING_FILES = new Set([
-  "app.json",
-  "appearance.json",
-  "backlink.json",
-  "canvas.json",
-  "command-palette.json",
-  "core-plugins.json",
-  "core-plugins-migration.json",
-  "daily-notes.json",
-  "file-recovery.json",
-  "graph.json",
-  "hotkeys.json",
-  "note-composer.json",
-  "page-preview.json",
-  "random-note.json",
-  "slash-command.json",
-  "switcher.json",
-  "templates.json",
-  "zk-prefixer.json"
-]);
-
-const EXCLUDED_CONFIG_PREFIXES = ["workspace", "workspaces"];
+const NOTE_CREATOR_SETTING_FILES = new Set(["daily-notes.json", "templates.json", "unique-note-creator.json", "zk-prefixer.json"]);
 
 export function shouldSyncPath(path: string, settings: PluginSettings, configDir: string): boolean {
   const normalizedPath = normalizePath(path);
@@ -34,8 +13,7 @@ export function shouldSyncPath(path: string, settings: PluginSettings, configDir
   const pluginId = communityPluginIdFromRelativePath(relativePath);
   if (pluginId) return settings.syncCommunityPlugins;
   if (relativePath.includes("/")) return false;
-  if (EXCLUDED_CONFIG_PREFIXES.some((prefix) => relativePath === `${prefix}.json` || relativePath.startsWith(`${prefix}-`))) return false;
-  return CORE_SETTING_FILES.has(relativePath);
+  return NOTE_CREATOR_SETTING_FILES.has(relativePath);
 }
 
 export function shouldSyncFile(file: TFile, settings: PluginSettings, configDir: string): boolean {

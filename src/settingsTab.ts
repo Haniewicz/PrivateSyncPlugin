@@ -139,7 +139,7 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Sync Obsidian settings")
-      .setDesc("Synchronizes selected safe files from the vault configuration folder, including core plugin state, daily notes, templates, and hotkeys.")
+      .setDesc("Synchronizes note creator settings only, including daily notes, templates, unique note creator, and Zettelkasten prefixer paths/formats.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.syncObsidianSettings).onChange(async (value) => {
           this.plugin.settings.syncObsidianSettings = value;
@@ -157,19 +157,6 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
           this.display();
         })
-      );
-
-    new Setting(containerEl)
-      .setName("Replace remote community plugins")
-      .setDesc("During an explicit Local -> Remote link operation, local community plugin folders may replace remote folders with the same plugin ID.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.replaceRemoteCommunityPluginsWithLocal)
-          .setDisabled(!this.plugin.settings.syncObsidianSettings || !this.plugin.settings.syncCommunityPlugins)
-          .onChange(async (value) => {
-            this.plugin.settings.replaceRemoteCommunityPluginsWithLocal = value;
-            await this.plugin.saveSettings();
-          })
       );
 
     new Setting(containerEl)

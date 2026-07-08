@@ -1,6 +1,6 @@
 {
   "name": "private-sync-plugin",
-  "version": "0.1.0-dev0.20",
+  "version": "0.1.0-dev0.21",
   "description": "Private server sync plugin for Obsidian.",
   "main": "main.js",
   "scripts": {
