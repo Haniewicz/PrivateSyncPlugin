@@ -1,5 +1,5 @@
 import { requestUrl, type RequestUrlParam, type RequestUrlResponse } from "obsidian";
-import type { DeviceType, FileHistoryEntry, PendingOperation, RemoteDevice, ServerChange, ServerConflict, ServerRequest } from "./types";
+import type { DeviceType, FileHistoryEntry, PendingOperation, RemoteDevice, ServerChange, ServerConflict, ServerRequest, ServerVault } from "./types";
 
 type ApiRequestInit = Omit<RequestUrlParam, "url"> & { authenticated?: boolean };
 
@@ -33,8 +33,12 @@ export class ApiClient {
     return this.post(`/api/v1/devices/request/${encodeURIComponent(requestId)}/status`, { password }, false);
   }
 
-  async getVaults(): Promise<{ vaults: Array<{ id: string; name: string; currentRevision: number }> }> {
+  async getVaults(): Promise<{ vaults: ServerVault[] }> {
     return this.get("/api/v1/vaults");
+  }
+
+  async createVault(input: { name: string; id?: string }): Promise<ServerVault> {
+    return this.post("/api/v1/vaults", input);
   }
 
   async getChanges(vaultId: string, since: number): Promise<{ changes: ServerChange[] }> {

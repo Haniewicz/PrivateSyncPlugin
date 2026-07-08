@@ -26,6 +26,11 @@ export class LocalIndexStore {
     await this.plugin.savePluginData({ index: this.index });
   }
 
+  async reset(): Promise<void> {
+    this.index = structuredClone(DEFAULT_INDEX);
+    await this.save();
+  }
+
   async enqueue(operation: PendingOperation): Promise<void> {
     if (this.index.queue.some((queued) => queued.clientChangeId === operation.clientChangeId)) return;
     this.index.queue = this.index.queue.filter((queued) => queued.path !== operation.path);

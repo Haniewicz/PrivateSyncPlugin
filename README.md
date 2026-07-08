@@ -20,9 +20,12 @@ Skopiuj `manifest.json`, `main.js` i `styles.css` do folderu pluginu w vaultcie 
 - offline queue z `client_change_id`,
 - batch upload do serwera,
 - pobieranie zmian od `last_applied_revision`,
+- wybór i tworzenie server-vaultów po sparowaniu urządzenia,
 - widok boczny: Status, Urządzenia, Konflikty, Historia.
 
 Na tym etapie lokalny indeks używa trwałego storage Obsidiana. SQLite warto dodać jako kolejny krok dla dużych vaultów.
+
+Każdy lokalny vault Obsidiana może wskazywać osobny server-vault. Zmiana server-vaulta w ustawieniach resetuje lokalny indeks synchronizacji, bo rewizje i kolejka zmian są przypisane do konkretnego vaulta po stronie serwera.
 
 ## Duże pliki i załączniki
 

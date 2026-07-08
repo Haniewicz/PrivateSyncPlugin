@@ -66,6 +66,12 @@ export type PluginSettings = {
   largeFileThresholdMb: number;
 };
 
+export type ServerVault = {
+  id: string;
+  name: string;
+  currentRevision: number;
+};
+
 export type ServerChange = {
   fileRevisionId: number;
   vaultRevision: number;

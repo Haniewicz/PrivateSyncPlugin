@@ -1,10 +1,11 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting, type DropdownComponent } from "obsidian";
 import type PrivateSyncPlugin from "./plugin";
-import type { DeviceType } from "./types";
+import type { DeviceType, ServerVault } from "./types";
 
 export class PrivateSyncSettingTab extends PluginSettingTab {
   private pairingPassword = "";
   private recoveryPairingCode = "";
+  private newVaultName = "";
 
   constructor(app: App, private readonly plugin: PrivateSyncPlugin) {
     super(app, plugin);
@@ -116,6 +117,8 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
         })
       );
 
+    this.renderVaultSettings(containerEl);
+
     new Setting(containerEl)
       .setName("Auto sync")
       .addToggle((toggle) =>
@@ -174,6 +177,89 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
     }
     await this.plugin.api.serverInfo();
     await this.plugin.api.login(this.pairingPassword);
+  }
+
+  private renderVaultSettings(containerEl: HTMLElement): void {
+    new Setting(containerEl)
+      .setName("Server vault")
+      .setDesc(`Current server vault: ${this.plugin.settings.vaultId}`)
+      .addDropdown((dropdown) => {
+        dropdown.addOption(this.plugin.settings.vaultId, this.plugin.settings.vaultId);
+        dropdown.setValue(this.plugin.settings.vaultId);
+        dropdown.onChange(async (value) => {
+          await this.selectVault(value);
+          this.display();
+        });
+        this.loadVaultOptions(dropdown).catch((error) => {
+          if (this.plugin.settings.deviceToken) new Notice(`Private Sync: cannot load vaults: ${errorMessage(error)}`, 10000);
+        });
+      })
+      .addButton((button) =>
+        button.setButtonText("Refresh").onClick(() => {
+          this.display();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Create server vault")
+      .setDesc("Creates an empty server vault and switches this Obsidian vault to it.")
+      .addText((text) =>
+        text
+          .setPlaceholder("Vault name")
+          .setValue(this.newVaultName)
+          .onChange((value) => {
+            this.newVaultName = value;
+          })
+      )
+      .addButton((button) =>
+        button.setButtonText("Create").onClick(async () => {
+          button.setDisabled(true);
+          button.setButtonText("Creating...");
+          try {
+            const vault = await this.createVault();
+            this.newVaultName = "";
+            new Notice(`Private Sync: switched to vault ${vault.name}.`, 8000);
+            this.display();
+          } catch (error) {
+            new Notice(`Private Sync: cannot create vault: ${errorMessage(error)}`, 10000);
+          } finally {
+            button.setDisabled(false);
+            button.setButtonText("Create");
+          }
+        })
+      );
+  }
+
+  private async loadVaultOptions(dropdown: DropdownComponent): Promise<void> {
+    if (!this.plugin.settings.deviceToken) return;
+    const response = await this.plugin.api.getVaults();
+    dropdown.selectEl.replaceChildren();
+    const vaults = response.vaults.sort((a, b) => a.name.localeCompare(b.name));
+    if (!vaults.some((vault) => vault.id === this.plugin.settings.vaultId)) {
+      dropdown.addOption(this.plugin.settings.vaultId, this.plugin.settings.vaultId);
+    }
+    for (const vault of vaults) {
+      dropdown.addOption(vault.id, `${vault.name} (${vault.id})`);
+    }
+    dropdown.setValue(this.plugin.settings.vaultId);
+  }
+
+  private async createVault(): Promise<ServerVault> {
+    const name = this.newVaultName.trim();
+    if (!name) throw new Error("Enter a vault name first.");
+    if (!this.plugin.settings.deviceToken) throw new Error("Pair this device before creating server vaults.");
+    const vault = await this.plugin.api.createVault({ name });
+    await this.selectVault(vault.id);
+    return vault;
+  }
+
+  private async selectVault(vaultId: string): Promise<void> {
+    if (!vaultId || vaultId === this.plugin.settings.vaultId) return;
+    this.plugin.settings.vaultId = vaultId;
+    await this.plugin.saveSettings();
+    await this.plugin.indexStore.reset();
+    this.plugin.refreshView();
+    new Notice(`Private Sync: switched to server vault ${vaultId}. Local sync index was reset.`, 8000);
   }
 }
 
