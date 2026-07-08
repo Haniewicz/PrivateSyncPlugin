@@ -64,6 +64,7 @@ export type ServerChange = {
   size: number;
   deleted: number;
   encrypted: number;
+  deviceId?: string;
   createdAt: string;
 };
 

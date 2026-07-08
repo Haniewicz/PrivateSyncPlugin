@@ -204,8 +204,21 @@ export class SyncEngine {
   private async applyServerChange(change: ServerChange): Promise<void> {
     const index = this.indexStore.get();
     const record = index.files[change.path];
+    if (change.deviceId && change.deviceId === this.plugin.settings.deviceId) {
+      if (record) {
+        record.serverRevisionId = change.fileRevisionId;
+        record.wasSynced = true;
+        record.status = record.localHash === change.contentHash ? "synced" : "dirty_local";
+      }
+      return;
+    }
     if (record?.status === "dirty_local" || record?.status === "pending_upload" || record?.status === "conflict") {
       record.status = "conflict";
+      return;
+    }
+    if (record && (await this.hasUnindexedLocalChange(change.path, record.localHash))) {
+      record.status = "conflict";
+      new Notice(`Private Sync: local edits preserved; conflict detected for ${change.path}.`, 10000);
       return;
     }
     if (change.deleted) {
@@ -258,6 +271,14 @@ export class SyncEngine {
     const parent = path.split("/").slice(0, -1).join("/");
     if (parent) await this.plugin.app.vault.createFolder(parent).catch(() => undefined);
     await this.plugin.app.vault.createBinary(path, content);
+  }
+
+  private async hasUnindexedLocalChange(path: string, indexedHash: string | null): Promise<boolean> {
+    const file = this.plugin.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return false;
+    const content = await this.plugin.app.vault.readBinary(file);
+    const currentHash = await sha256(content);
+    return currentHash !== indexedHash;
   }
 
   private async savePairedDevice(deviceId: string, deviceToken: string): Promise<void> {
