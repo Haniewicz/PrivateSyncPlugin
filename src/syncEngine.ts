@@ -107,7 +107,16 @@ export class SyncEngine {
     }
 
     for (const [path, record] of Object.entries(index.files)) {
-      if (!seen.has(path) && record.wasSynced && record.status !== "deleted_local") {
+      const hasQueuedOperation = index.queue.some((operation) => operation.path === path);
+      if (
+        !seen.has(path) &&
+        record.wasSynced &&
+        record.status !== "deleted_local" &&
+        record.status !== "conflict" &&
+        record.status !== "locked_by_request" &&
+        !isSyncedDeletedRecord(record) &&
+        !hasQueuedOperation
+      ) {
         await this.indexStore.enqueue({
           clientChangeId: uuid(),
           type: "delete",
@@ -173,6 +182,11 @@ export class SyncEngine {
           record.serverRevisionId = result.revision;
           record.status = "synced";
           record.wasSynced = true;
+          if (operation.type === "delete") {
+            record.localHash = null;
+            record.size = 0;
+            record.mtime = Date.now();
+          }
         }
       }
       await this.indexStore.removeFromQueue(batchOperations.map((operation) => operation.clientChangeId));
@@ -386,6 +400,8 @@ export class SyncEngine {
 
   private async tryAutoMergeConflict(operation: PendingOperation): Promise<boolean> {
     const index = this.indexStore.get();
+    if (operation.type === "delete") return this.tryAutoResolveDeleteConflict(operation);
+
     const file = this.plugin.app.vault.getAbstractFileByPath(operation.path);
     const record = index.files[operation.path];
     if (!isAutoMergeCandidate(operation, record, file)) return false;
@@ -394,13 +410,15 @@ export class SyncEngine {
     const current = history.history[0];
     if (!current || current.deleted) return false;
 
-    const [serverContent, localContent] = await Promise.all([
+    const [serverContent, localContent, baseContent] = await Promise.all([
       this.api.download(this.plugin.settings.vaultId, operation.path),
-      this.plugin.app.vault.readBinary(file)
+      this.plugin.app.vault.readBinary(file),
+      operation.baseRevisionId ? this.api.downloadRevision(this.plugin.settings.vaultId, operation.baseRevisionId).catch(() => null) : null
     ]);
     const serverText = decodeUtf8(serverContent);
     const localText = decodeUtf8(localContent);
-    const merge = mergeServerWithUniqueLocal(serverText, localText);
+    const baseText = baseContent ? decodeUtf8(baseContent) : null;
+    const merge = mergeServerWithUniqueLocal(serverText, localText, baseText);
     if (!merge) return false;
 
     const mergedContent = encodeUtf8(merge.text);
@@ -448,6 +466,39 @@ export class SyncEngine {
     return true;
   }
 
+  private async tryAutoResolveDeleteConflict(operation: PendingOperation): Promise<boolean> {
+    const index = this.indexStore.get();
+    const history = await this.api.history(this.plugin.settings.vaultId, operation.path);
+    const current = history.history[0];
+    if (!current?.deleted) return false;
+
+    await this.indexStore.removePathFromQueue(operation.path);
+    index.files[operation.path] = {
+      path: operation.path,
+      localHash: null,
+      size: 0,
+      mtime: Date.now(),
+      serverRevisionId: current.id,
+      status: "synced",
+      wasSynced: true
+    };
+    await this.resolveRemoteConflicts(operation.path, "resolved", {
+      strategy: "auto_delete_already_deleted",
+      serverRevisionId: current.id
+    });
+    await this.plugin.recordSyncEvent({
+      type: "auto_merge",
+      path: operation.path,
+      message: `Resolved delete conflict in ${operation.path}`,
+      details: {
+        strategy: "auto_delete_already_deleted",
+        serverRevisionId: current.id
+      }
+    });
+    new Notice(`Private Sync: resolved delete conflict in ${operation.path}.`, 10000);
+    return true;
+  }
+
   private async resolveRemoteConflicts(path: string, status: "resolved" | "cancelled", decision: unknown): Promise<void> {
     const response = await this.api.conflicts(this.plugin.settings.vaultId);
     const conflicts = response.conflicts.filter((conflict) => conflict.filePath === path);
@@ -489,14 +540,17 @@ function sleep(ms: number): Promise<void> {
 
 function isAutoMergeCandidate(
   operation: PendingOperation,
-  record: { wasSynced: boolean } | undefined,
+  _record: { wasSynced: boolean } | undefined,
   file: unknown
 ): file is TFile {
   if (!(file instanceof TFile)) return false;
   if (operation.type !== "create" && operation.type !== "update") return false;
   if (!isAutoMergeTextFile(file)) return false;
-  if (operation.type === "update" && record?.wasSynced) return false;
   return true;
+}
+
+function isSyncedDeletedRecord(record: { localHash: string | null; size: number; status: string }): boolean {
+  return record.status === "synced" && record.localHash === null && record.size === 0;
 }
 
 function isAutoMergeTextFile(file: TFile): boolean {
@@ -504,12 +558,22 @@ function isAutoMergeTextFile(file: TFile): boolean {
   return extension === "md" || extension === "markdown" || extension === "txt";
 }
 
-function mergeServerWithUniqueLocal(serverText: string, localText: string): { text: string; appendedLineCount: number } | null {
+function mergeServerWithUniqueLocal(serverText: string, localText: string, baseText: string | null): { text: string; appendedLineCount: number } | null {
   if (serverText === localText) return { text: serverText, appendedLineCount: 0 };
   if (!localText.trim()) return { text: serverText, appendedLineCount: 0 };
   const serverLines = splitLines(serverText);
   const localLines = splitLines(localText);
   const serverLineSet = new Set(serverLines.map((line) => line.trim()).filter(Boolean));
+  if (baseText !== null) {
+    const baseLineSet = new Set(splitLines(baseText).map((line) => line.trim()).filter(Boolean));
+    const localLineSet = new Set(localLines.map((line) => line.trim()).filter(Boolean));
+    const localRemovedBaseLineStillOnServer = Array.from(baseLineSet).some((line) => serverLineSet.has(line) && !localLineSet.has(line));
+    const localHasNewLine = localLines.some((line) => {
+      const normalized = line.trim();
+      return normalized && !baseLineSet.has(normalized) && !serverLineSet.has(normalized);
+    });
+    if (localRemovedBaseLineStillOnServer && localHasNewLine) return null;
+  }
   const uniqueLocalLines = localLines.filter((line) => {
     const normalized = line.trim();
     return normalized && !serverLineSet.has(normalized);
