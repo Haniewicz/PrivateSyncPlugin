@@ -62,7 +62,7 @@ export class ApiClient {
         `/api/v1/vaults/${encodeURIComponent(vaultId)}/sync-batches/${encodeURIComponent(batchId)}/chunked-upload/${encodeURIComponent(init.uploadId)}/chunks/${index}`,
         {
           method: "PUT",
-          headers: { "content-type": "application/octet-stream" },
+          contentType: "application/octet-stream",
           body: chunk
         }
       );
