@@ -84,3 +84,38 @@ export type ServerRequest = {
   created_at?: string;
   createdAt?: string;
 };
+
+export type RemoteDevice = {
+  id: string;
+  name: string;
+  type: DeviceType;
+  trusted: number;
+  revoked_at: string | null;
+  last_seen_at: string | null;
+  created_at: string;
+};
+
+export type ServerConflict = {
+  id: string;
+  filePath: string;
+  baseRevisionId: number | null;
+  serverRevisionId: number | null;
+  incomingBatchId: string;
+  incomingClientChangeId: string;
+  deviceId: string;
+  deviceName: string | null;
+  deviceType: DeviceType | null;
+  status: string;
+  createdAt: string;
+};
+
+export type FileHistoryEntry = {
+  id: number;
+  vaultRevision: number;
+  contentHash: string | null;
+  size: number;
+  deleted: number;
+  encrypted: number;
+  deviceId: string;
+  createdAt: string;
+};

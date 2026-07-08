@@ -1,7 +1,7 @@
 import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
 import { parseDevicePairingPayload } from "./pairingApprovalModal";
 import type PrivateSyncPlugin from "./plugin";
-import type { DevicePairingRequestPayload, ServerRequest } from "./types";
+import type { DevicePairingRequestPayload, FileHistoryEntry, LocalFileRecord, RemoteDevice, ServerConflict, ServerRequest } from "./types";
 
 export const PRIVATE_SYNC_VIEW = "private-sync-view";
 
@@ -9,6 +9,7 @@ type Tab = "status" | "devices" | "requests" | "conflicts" | "history";
 
 export class PrivateSyncView extends ItemView {
   private activeTab: Tab = "status";
+  private historyPath = "";
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: PrivateSyncPlugin) {
     super(leaf);
@@ -76,7 +77,11 @@ export class PrivateSyncView extends ItemView {
       .devices()
       .then((response) => {
         list.empty();
-        for (const device of response.devices) this.row(list, "Device", JSON.stringify(device));
+        if (response.devices.length === 0) {
+          this.row(list, "Status", "no devices");
+          return;
+        }
+        for (const device of response.devices) this.deviceRow(list, device);
       })
       .catch((error) => this.row(list, "Error", error.message));
     this.row(list, "Loading", kind);
@@ -84,12 +89,25 @@ export class PrivateSyncView extends ItemView {
 
   private renderConflicts(root: Element): void {
     const list = root.createDiv({ cls: "private-sync-list" });
-    const conflicts = Object.values(this.plugin.indexStore.get().files).filter((file) => file.status === "conflict" || file.status === "locked_by_request");
-    if (conflicts.length === 0) {
-      this.row(list, "Status", "no local conflicts");
-      return;
-    }
-    for (const conflict of conflicts) this.row(list, conflict.path, conflict.status);
+    const localConflicts = Object.values(this.plugin.indexStore.get().files).filter(
+      (file) => file.status === "conflict" || file.status === "locked_by_request"
+    );
+    for (const conflict of localConflicts) this.localConflictRow(list, conflict);
+    this.plugin.api
+      .conflicts(this.plugin.settings.vaultId)
+      .then((response) => {
+        const remoteOnly = response.conflicts.filter((conflict) => !localConflicts.some((local) => local.path === conflict.filePath));
+        if (localConflicts.length === 0 && remoteOnly.length === 0) {
+          list.empty();
+          this.row(list, "Status", "no conflicts");
+          return;
+        }
+        for (const conflict of remoteOnly) this.remoteConflictRow(list, conflict);
+      })
+      .catch((error) => {
+        if (localConflicts.length === 0) this.row(list, "Error", error.message);
+      });
+    if (localConflicts.length === 0) this.row(list, "Loading", "conflicts");
   }
 
   private renderRequests(root: Element): void {
@@ -121,8 +139,47 @@ export class PrivateSyncView extends ItemView {
   }
 
   private renderHistory(root: Element): void {
+    const controls = root.createDiv({ cls: "private-sync-toolbar" });
+    const input = controls.createEl("input", {
+      type: "text",
+      placeholder: "Path, e.g. Notes/today.md",
+      value: this.historyPath
+    });
+    input.onchange = () => {
+      this.historyPath = input.value.trim();
+      this.render();
+    };
+    const activeFile = this.plugin.app.workspace.getActiveFile();
+    controls.createEl("button", { text: "Active file" }).onclick = () => {
+      if (!activeFile) {
+        new Notice("Private Sync: no active file.", 5000);
+        return;
+      }
+      this.historyPath = activeFile.path;
+      this.render();
+    };
+    controls.createEl("button", { text: "Load" }).onclick = () => {
+      this.historyPath = input.value.trim();
+      this.render();
+    };
+
     const list = root.createDiv({ cls: "private-sync-list" });
-    this.row(list, "History", "select file history API is ready on the server; file picker UI is next");
+    if (!this.historyPath) {
+      this.row(list, "History", "choose a file path");
+      return;
+    }
+    this.plugin.api
+      .history(this.plugin.settings.vaultId, this.historyPath)
+      .then((response) => {
+        list.empty();
+        if (response.history.length === 0) {
+          this.row(list, "History", "no revisions");
+          return;
+        }
+        for (const entry of response.history) this.historyRow(list, entry);
+      })
+      .catch((error) => this.row(list, "Error", error.message));
+    this.row(list, "Loading", this.historyPath);
   }
 
   private row(parent: Element, name: string, value: string): void {
@@ -154,6 +211,68 @@ export class PrivateSyncView extends ItemView {
         approve.textContent = "Approve";
       }
     };
+  }
+
+  private deviceRow(parent: Element, device: RemoteDevice): void {
+    const row = parent.createDiv({ cls: "private-sync-row private-sync-action-row" });
+    const details = row.createDiv();
+    details.createDiv({ text: device.name });
+    details.createDiv({
+      text: `${device.type} · ${device.revoked_at ? "revoked" : "trusted"} · last seen ${device.last_seen_at ?? "never"}`,
+      cls: "private-sync-muted"
+    });
+    const revoke = row.createEl("button", { text: "Revoke" });
+    revoke.disabled = Boolean(device.revoked_at) || device.id === this.plugin.settings.deviceId;
+    revoke.onclick = async () => {
+      revoke.disabled = true;
+      revoke.textContent = "Revoking...";
+      try {
+        await this.plugin.api.revokeDevice(device.id);
+        new Notice(`Private Sync: revoked ${device.name}.`, 8000);
+        this.render();
+      } catch (error) {
+        new Notice(`Private Sync revoke failed: ${errorMessage(error)}`, 10000);
+        revoke.disabled = false;
+        revoke.textContent = "Revoke";
+      }
+    };
+  }
+
+  private localConflictRow(parent: Element, conflict: LocalFileRecord): void {
+    const row = parent.createDiv({ cls: "private-sync-row private-sync-conflict-row" });
+    const details = row.createDiv();
+    details.createDiv({ text: conflict.path });
+    details.createDiv({ text: conflict.status, cls: "private-sync-muted" });
+    const actions = row.createDiv({ cls: "private-sync-actions" });
+    actions.createEl("button", { text: "Keep local" }).onclick = () => this.resolveConflict(conflict.path, "keep_local");
+    actions.createEl("button", { text: "Use server" }).onclick = () => this.resolveConflict(conflict.path, "use_server");
+  }
+
+  private remoteConflictRow(parent: Element, conflict: ServerConflict): void {
+    const row = parent.createDiv({ cls: "private-sync-row" });
+    row.createDiv({ text: conflict.filePath });
+    row.createDiv({
+      text: `pending on ${conflict.deviceName ?? conflict.deviceId}`,
+      cls: "private-sync-muted"
+    });
+  }
+
+  private async resolveConflict(path: string, strategy: "keep_local" | "use_server"): Promise<void> {
+    try {
+      await this.plugin.syncEngine.resolveLocalConflict(path, strategy);
+      this.render();
+    } catch (error) {
+      new Notice(`Private Sync conflict resolution failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
+  private historyRow(parent: Element, entry: FileHistoryEntry): void {
+    const row = parent.createDiv({ cls: "private-sync-row" });
+    row.createDiv({ text: `Revision ${entry.vaultRevision}` });
+    row.createDiv({
+      text: `${entry.deleted ? "deleted" : `${entry.size} B`} · ${entry.createdAt}`,
+      cls: "private-sync-muted"
+    });
   }
 }
 

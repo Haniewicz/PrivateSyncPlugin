@@ -1,5 +1,5 @@
 import { requestUrl, type RequestUrlParam, type RequestUrlResponse } from "obsidian";
-import type { DeviceType, PendingOperation, ServerChange, ServerRequest } from "./types";
+import type { DeviceType, FileHistoryEntry, PendingOperation, RemoteDevice, ServerChange, ServerConflict, ServerRequest } from "./types";
 
 type ApiRequestInit = Omit<RequestUrlParam, "url"> & { authenticated?: boolean };
 
@@ -120,8 +120,12 @@ export class ApiClient {
     return merged.buffer;
   }
 
-  async devices(): Promise<{ devices: unknown[] }> {
+  async devices(): Promise<{ devices: RemoteDevice[] }> {
     return this.get("/api/v1/devices");
+  }
+
+  async revokeDevice(deviceId: string): Promise<{ ok: true }> {
+    return this.post("/api/v1/devices/revoke", { deviceId });
   }
 
   async approveDeviceRequest(input: {
@@ -134,6 +138,21 @@ export class ApiClient {
 
   async requests(vaultId: string): Promise<{ requests: ServerRequest[] }> {
     return this.get(`/api/v1/vaults/${encodeURIComponent(vaultId)}/requests`);
+  }
+
+  async conflicts(vaultId: string): Promise<{ conflicts: ServerConflict[] }> {
+    return this.get(`/api/v1/vaults/${encodeURIComponent(vaultId)}/conflicts`);
+  }
+
+  async resolveConflict(vaultId: string, conflictId: string, status: "resolved" | "cancelled", decision: unknown): Promise<{ ok: true }> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/conflicts/${encodeURIComponent(conflictId)}/resolve`, {
+      status,
+      decision
+    });
+  }
+
+  async history(vaultId: string, path: string): Promise<{ history: FileHistoryEntry[] }> {
+    return this.get(`/api/v1/vaults/${encodeURIComponent(vaultId)}/files/history?path=${encodeURIComponent(path)}`);
   }
 
   private async get<T>(path: string): Promise<T> {

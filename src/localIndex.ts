@@ -39,4 +39,9 @@ export class LocalIndexStore {
     this.index.queue = this.index.queue.filter((operation) => !set.has(operation.clientChangeId));
     await this.save();
   }
+
+  async removePathFromQueue(path: string): Promise<void> {
+    this.index.queue = this.index.queue.filter((operation) => operation.path !== path);
+    await this.save();
+  }
 }

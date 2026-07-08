@@ -203,6 +203,68 @@ export class SyncEngine {
     await this.indexStore.save();
   }
 
+  async resolveLocalConflict(path: string, strategy: "keep_local" | "use_server"): Promise<void> {
+    if (this.plugin.handleOfflineSyncAttempt()) return;
+    const index = this.indexStore.get();
+    const record = index.files[path];
+    if (!record) throw new Error(`No local record for ${path}.`);
+    if (strategy === "use_server") {
+      await this.indexStore.removePathFromQueue(path);
+      const history = await this.api.history(this.plugin.settings.vaultId, path);
+      const current = history.history[0];
+      if (!current) throw new Error("Server version is unavailable.");
+      if (current.deleted) {
+        const file = this.plugin.app.vault.getAbstractFileByPath(path);
+        if (file instanceof TFile) await this.plugin.app.fileManager.trashFile(file);
+        index.files[path] = {
+          path,
+          localHash: null,
+          size: 0,
+          mtime: Date.now(),
+          serverRevisionId: current.id,
+          status: "synced",
+          wasSynced: true
+        };
+      } else {
+        const content = await this.api.download(this.plugin.settings.vaultId, path);
+        await this.writeFile(path, content);
+        index.files[path] = {
+          path,
+          localHash: current.contentHash,
+          size: current.size,
+          mtime: Date.now(),
+          serverRevisionId: current.id,
+          status: "synced",
+          wasSynced: true
+        };
+      }
+      await this.indexStore.save();
+      await this.resolveRemoteConflicts(path, "cancelled", { strategy });
+      new Notice(`Private Sync: using server version for ${path}.`, 8000);
+      this.plugin.refreshView();
+      return;
+    }
+
+    const file = this.plugin.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) throw new Error(`Local file not found: ${path}.`);
+    const history = await this.api.history(this.plugin.settings.vaultId, path);
+    const current = history.history[0];
+    const content = await this.plugin.app.vault.readBinary(file);
+    const localHash = await sha256(content);
+    record.localHash = localHash;
+    record.size = file.stat.size;
+    record.mtime = file.stat.mtime;
+    record.serverRevisionId = current?.id ?? record.serverRevisionId;
+    record.status = "dirty_local";
+    await this.indexStore.removePathFromQueue(path);
+    await this.enqueueFile(file, record.wasSynced ? "update" : "create", current?.id ?? record.serverRevisionId, localHash);
+    await this.pushQueue();
+    await this.pullChanges();
+    await this.resolveRemoteConflicts(path, "resolved", { strategy });
+    this.plugin.refreshView();
+    new Notice(`Private Sync: kept local version for ${path}.`, 8000);
+  }
+
   private async applyServerChange(change: ServerChange): Promise<void> {
     const index = this.indexStore.get();
     const record = index.files[change.path];
@@ -281,6 +343,14 @@ export class SyncEngine {
     const content = await this.plugin.app.vault.readBinary(file);
     const currentHash = await sha256(content);
     return currentHash !== indexedHash;
+  }
+
+  private async resolveRemoteConflicts(path: string, status: "resolved" | "cancelled", decision: unknown): Promise<void> {
+    const response = await this.api.conflicts(this.plugin.settings.vaultId);
+    const conflicts = response.conflicts.filter((conflict) => conflict.filePath === path);
+    for (const conflict of conflicts) {
+      await this.api.resolveConflict(this.plugin.settings.vaultId, conflict.id, status, decision);
+    }
   }
 
   private async savePairedDevice(deviceId: string, deviceToken: string): Promise<void> {

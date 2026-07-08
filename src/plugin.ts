@@ -212,6 +212,9 @@ export default class PrivateSyncPlugin extends Plugin {
           this.syncEngine.syncNow().catch((error) => new Notice(`Private Sync: ${error.message}`));
         }
       }
+      if (message.type === "conflict_resolved") {
+        this.refreshView();
+      }
       this.refreshView();
     };
     socket.onclose = () => {

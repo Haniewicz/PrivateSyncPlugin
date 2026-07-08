@@ -54,6 +54,18 @@
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.private-sync-action-row,
+.private-sync-conflict-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.private-sync-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .private-sync-status-bar {
   display: inline-flex;
   align-items: center;
