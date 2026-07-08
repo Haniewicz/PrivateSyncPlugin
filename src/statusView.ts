@@ -6,7 +6,7 @@ import type { DevicePairingRequestPayload, FileHistoryEntry, LocalFileRecord, Re
 
 export const PRIVATE_SYNC_VIEW = "private-sync-view";
 
-type Tab = "status" | "devices" | "requests" | "conflicts" | "history";
+type Tab = "status" | "devices" | "requests" | "conflicts" | "history" | "events";
 
 export class PrivateSyncView extends ItemView {
   private activeTab: Tab = "status";
@@ -42,7 +42,7 @@ export class PrivateSyncView extends ItemView {
     toolbar.createEl("button", { text: "Pair" }).onclick = () => this.plugin.syncEngine.pairDevice();
 
     const tabs = root.createDiv({ cls: "private-sync-tabs" });
-    for (const tab of ["status", "devices", "requests", "conflicts", "history"] as Tab[]) {
+    for (const tab of ["status", "devices", "requests", "conflicts", "history", "events"] as Tab[]) {
       const button = tabs.createEl("button", { text: label(tab), cls: "private-sync-tab" });
       if (tab === this.activeTab) button.addClass("is-active");
       button.onclick = () => {
@@ -56,6 +56,7 @@ export class PrivateSyncView extends ItemView {
     if (this.activeTab === "requests") this.renderRequests(root);
     if (this.activeTab === "conflicts") this.renderConflicts(root);
     if (this.activeTab === "history") this.renderHistory(root);
+    if (this.activeTab === "events") this.renderEvents(root);
   }
 
   private renderStatus(root: Element): void {
@@ -185,6 +186,21 @@ export class PrivateSyncView extends ItemView {
       })
       .catch((error) => this.row(list, "Error", error.message));
     this.row(list, "Loading", this.historyPath);
+  }
+
+  private renderEvents(root: Element): void {
+    const list = root.createDiv({ cls: "private-sync-list" });
+    if (this.plugin.events.length === 0) {
+      this.row(list, "Events", "no sync events");
+      return;
+    }
+    for (const event of this.plugin.events.slice(0, 100)) {
+      const row = list.createDiv({ cls: "private-sync-row private-sync-event-row" });
+      const details = row.createDiv();
+      details.createDiv({ text: event.path ? `${event.type}: ${event.path}` : event.type });
+      details.createDiv({ text: event.message, cls: "private-sync-muted" });
+      row.createDiv({ text: event.timestamp, cls: "private-sync-muted" });
+    }
   }
 
   private row(parent: Element, name: string, value: string): void {

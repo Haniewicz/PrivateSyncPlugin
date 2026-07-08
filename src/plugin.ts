@@ -6,15 +6,17 @@ import { PairingApprovalModal, parseDevicePairingPayload } from "./pairingApprov
 import { PrivateSyncSettingTab } from "./settingsTab";
 import { SyncEngine } from "./syncEngine";
 import { PRIVATE_SYNC_VIEW, PrivateSyncView } from "./statusView";
-import type { LocalIndex, PluginSettings, ServerRequest } from "./types";
+import type { LocalIndex, PluginSettings, ServerRequest, SyncEvent } from "./types";
 
 type StoredData = {
   settings?: Partial<PluginSettings>;
   index?: LocalIndex;
+  events?: SyncEvent[];
 };
 
 export default class PrivateSyncPlugin extends Plugin {
   settings: PluginSettings = { ...DEFAULT_SETTINGS };
+  events: SyncEvent[] = [];
   indexStore = new LocalIndexStore(this);
   api = new ApiClient(this.settings.serverUrl, () => this.settings.deviceToken);
   syncEngine = new SyncEngine(this, this.indexStore, this.api);
@@ -27,6 +29,7 @@ export default class PrivateSyncPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    await this.loadEvents();
     await this.indexStore.load();
     this.recreateApi();
 
@@ -99,6 +102,17 @@ export default class PrivateSyncPlugin extends Plugin {
     await this.saveData({ ...existing, ...partial });
   }
 
+  async loadEvents(): Promise<void> {
+    const data = (await this.loadData()) as StoredData | null;
+    this.events = data?.events ?? [];
+  }
+
+  async recordSyncEvent(event: Omit<SyncEvent, "timestamp"> & { timestamp?: string }): Promise<void> {
+    this.events = [{ ...event, timestamp: event.timestamp ?? new Date().toISOString() }, ...this.events].slice(0, 200);
+    await this.savePluginData({ events: this.events });
+    this.refreshView();
+  }
+
   refreshView(): void {
     for (const leaf of this.app.workspace.getLeavesOfType(PRIVATE_SYNC_VIEW)) {
       const view = leaf.view;
@@ -116,6 +130,10 @@ export default class PrivateSyncPlugin extends Plugin {
       }
       this.refreshView();
     } catch (error) {
+      await this.recordSyncEvent({
+        type: "error",
+        message: `Cannot load pairing requests: ${(error as Error).message}`
+      });
       new Notice(`Private Sync: cannot load pairing requests: ${(error as Error).message}`, 10000);
     }
   }
@@ -139,6 +157,10 @@ export default class PrivateSyncPlugin extends Plugin {
     try {
       await this.syncEngine.syncNow();
     } catch (error) {
+      await this.recordSyncEvent({
+        type: "error",
+        message: `Sync failed: ${(error as Error).message}`
+      });
       new Notice(`Private Sync: ${(error as Error).message}`);
     }
   }, 1500);
@@ -283,6 +305,10 @@ export default class PrivateSyncPlugin extends Plugin {
     this.updateConnectionStatus();
     if (!this.offlineNoticeShown) {
       this.offlineNoticeShown = true;
+      this.recordSyncEvent({
+        type: "offline",
+        message: "Jesteś offline. Dane nie są synchronizowane"
+      });
       new Notice("Jesteś offline. Dane nie są synchronizowane", 10000);
     }
     return true;

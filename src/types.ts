@@ -41,6 +41,16 @@ export type LocalIndex = {
   queue: PendingOperation[];
 };
 
+export type SyncEventType = "auto_merge" | "conflict" | "manual_resolution" | "offline" | "error";
+
+export type SyncEvent = {
+  timestamp: string;
+  type: SyncEventType;
+  path?: string;
+  message: string;
+  details?: Record<string, unknown>;
+};
+
 export type PluginSettings = {
   serverUrl: string;
   deviceName: string;

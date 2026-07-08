@@ -177,18 +177,36 @@ export class SyncEngine {
       }
       await this.indexStore.removeFromQueue(batchOperations.map((operation) => operation.clientChangeId));
     } else if (result.status === "conflict") {
+      const autoMergedIds = await this.tryAutoMergeConflicts(batchOperations);
       for (const operation of batchOperations) {
+        if (autoMergedIds.has(operation.clientChangeId)) continue;
         const record = index.files[operation.path];
-        if (record) record.status = "conflict";
+        if (record) {
+          record.status = "conflict";
+          await this.plugin.recordSyncEvent({
+            type: "conflict",
+            path: operation.path,
+            message: `Conflict detected for ${operation.path}`,
+            details: { clientChangeId: operation.clientChangeId, conflictIds: result.conflicts ?? [] }
+          });
+        }
       }
       await this.indexStore.save();
-      new Notice("Private Sync: conflict detected.");
+      if (autoMergedIds.size > 0) {
+        await this.pushQueue();
+      }
+      if (autoMergedIds.size < batchOperations.length) new Notice("Private Sync: conflict detected.");
     } else if (result.status === "waiting_for_decision") {
       for (const operation of batchOperations) {
         const record = index.files[operation.path];
         if (record) record.status = "locked_by_request";
       }
       await this.indexStore.save();
+      await this.plugin.recordSyncEvent({
+        type: "conflict",
+        message: "Server requires a decision before syncing.",
+        details: { requestId: result.requestId }
+      });
       new Notice("Private Sync: server requires a decision.");
     }
   }
@@ -240,6 +258,12 @@ export class SyncEngine {
       }
       await this.indexStore.save();
       await this.resolveRemoteConflicts(path, "cancelled", { strategy });
+      await this.plugin.recordSyncEvent({
+        type: "manual_resolution",
+        path,
+        message: `Used server version for ${path}`,
+        details: { strategy }
+      });
       new Notice(`Private Sync: using server version for ${path}.`, 8000);
       this.plugin.refreshView();
       return;
@@ -261,6 +285,12 @@ export class SyncEngine {
     await this.pushQueue();
     await this.pullChanges();
     await this.resolveRemoteConflicts(path, "resolved", { strategy });
+    await this.plugin.recordSyncEvent({
+      type: "manual_resolution",
+      path,
+      message: `Kept local version for ${path}`,
+      details: { strategy }
+    });
     this.plugin.refreshView();
     new Notice(`Private Sync: kept local version for ${path}.`, 8000);
   }
@@ -345,6 +375,79 @@ export class SyncEngine {
     return currentHash !== indexedHash;
   }
 
+  private async tryAutoMergeConflicts(operations: PendingOperation[]): Promise<Set<string>> {
+    const mergedIds = new Set<string>();
+    for (const operation of operations) {
+      const merged = await this.tryAutoMergeConflict(operation);
+      if (merged) mergedIds.add(operation.clientChangeId);
+    }
+    return mergedIds;
+  }
+
+  private async tryAutoMergeConflict(operation: PendingOperation): Promise<boolean> {
+    const index = this.indexStore.get();
+    const file = this.plugin.app.vault.getAbstractFileByPath(operation.path);
+    const record = index.files[operation.path];
+    if (!isAutoMergeCandidate(operation, record, file)) return false;
+
+    const history = await this.api.history(this.plugin.settings.vaultId, operation.path);
+    const current = history.history[0];
+    if (!current || current.deleted) return false;
+
+    const [serverContent, localContent] = await Promise.all([
+      this.api.download(this.plugin.settings.vaultId, operation.path),
+      this.plugin.app.vault.readBinary(file)
+    ]);
+    const serverText = decodeUtf8(serverContent);
+    const localText = decodeUtf8(localContent);
+    const merge = mergeServerWithUniqueLocal(serverText, localText);
+    if (!merge) return false;
+
+    const mergedContent = encodeUtf8(merge.text);
+    await this.writeFile(operation.path, mergedContent);
+    const mergedHash = await sha256(mergedContent);
+    index.files[operation.path] = {
+      path: operation.path,
+      localHash: mergedHash,
+      size: mergedContent.byteLength,
+      mtime: Date.now(),
+      serverRevisionId: current.id,
+      status: "dirty_local",
+      wasSynced: true
+    };
+    await this.indexStore.removePathFromQueue(operation.path);
+    if (merge.appendedLineCount > 0) {
+      await this.indexStore.enqueue({
+        clientChangeId: uuid(),
+        type: "update",
+        path: operation.path,
+        baseRevisionId: current.id,
+        contentHash: mergedHash,
+        size: mergedContent.byteLength,
+        detectedAt: new Date().toISOString()
+      });
+    } else {
+      index.files[operation.path].status = "synced";
+    }
+    await this.resolveRemoteConflicts(operation.path, "resolved", {
+      strategy: "auto_merge_unique_local",
+      appendedLineCount: merge.appendedLineCount,
+      serverRevisionId: current.id
+    });
+    await this.plugin.recordSyncEvent({
+      type: "auto_merge",
+      path: operation.path,
+      message: `Auto-merged conflict in ${operation.path}`,
+      details: {
+        strategy: "auto_merge_unique_local",
+        appendedLineCount: merge.appendedLineCount,
+        serverRevisionId: current.id
+      }
+    });
+    new Notice(`Private Sync: auto-merged conflict in ${operation.path}.`, 10000);
+    return true;
+  }
+
   private async resolveRemoteConflicts(path: string, status: "resolved" | "cancelled", decision: unknown): Promise<void> {
     const response = await this.api.conflicts(this.plugin.settings.vaultId);
     const conflicts = response.conflicts.filter((conflict) => conflict.filePath === path);
@@ -382,4 +485,51 @@ export class SyncEngine {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function isAutoMergeCandidate(
+  operation: PendingOperation,
+  record: { wasSynced: boolean } | undefined,
+  file: unknown
+): file is TFile {
+  if (!(file instanceof TFile)) return false;
+  if (operation.type !== "create" && operation.type !== "update") return false;
+  if (!isAutoMergeTextFile(file)) return false;
+  if (operation.type === "update" && record?.wasSynced) return false;
+  return true;
+}
+
+function isAutoMergeTextFile(file: TFile): boolean {
+  const extension = file.extension.toLowerCase();
+  return extension === "md" || extension === "markdown" || extension === "txt";
+}
+
+function mergeServerWithUniqueLocal(serverText: string, localText: string): { text: string; appendedLineCount: number } | null {
+  if (serverText === localText) return { text: serverText, appendedLineCount: 0 };
+  if (!localText.trim()) return { text: serverText, appendedLineCount: 0 };
+  const serverLines = splitLines(serverText);
+  const localLines = splitLines(localText);
+  const serverLineSet = new Set(serverLines.map((line) => line.trim()).filter(Boolean));
+  const uniqueLocalLines = localLines.filter((line) => {
+    const normalized = line.trim();
+    return normalized && !serverLineSet.has(normalized);
+  });
+  if (uniqueLocalLines.length === 0) return { text: serverText, appendedLineCount: 0 };
+  const separator = serverText.endsWith("\n") || serverText.length === 0 ? "" : "\n";
+  return {
+    text: `${serverText}${separator}${uniqueLocalLines.join("\n")}`,
+    appendedLineCount: uniqueLocalLines.length
+  };
+}
+
+function splitLines(text: string): string[] {
+  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+}
+
+function decodeUtf8(content: ArrayBuffer): string {
+  return new TextDecoder().decode(content);
+}
+
+function encodeUtf8(text: string): ArrayBuffer {
+  return new TextEncoder().encode(text).buffer;
 }

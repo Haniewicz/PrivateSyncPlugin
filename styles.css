@@ -66,6 +66,10 @@
   justify-content: flex-end;
 }
 
+.private-sync-event-row {
+  grid-template-columns: minmax(0, 1fr) minmax(120px, auto);
+}
+
 .private-sync-status-bar {
   display: inline-flex;
   align-items: center;
