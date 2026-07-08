@@ -53,6 +53,7 @@ export class SyncEngine {
       await this.scanLocalChanges();
       await this.pushQueue();
       await this.pullChanges();
+      await this.reconcileResolvedLocalConflicts();
       this.plugin.refreshView();
     } finally {
       this.running = false;
@@ -391,9 +392,19 @@ export class SyncEngine {
 
   private async tryAutoMergeConflicts(operations: PendingOperation[]): Promise<Set<string>> {
     const mergedIds = new Set<string>();
+    const mergedPaths = new Set<string>();
     for (const operation of operations) {
+      if (mergedPaths.has(operation.path)) {
+        mergedIds.add(operation.clientChangeId);
+        continue;
+      }
       const merged = await this.tryAutoMergeConflict(operation);
-      if (merged) mergedIds.add(operation.clientChangeId);
+      if (merged) {
+        mergedPaths.add(operation.path);
+        for (const matchingOperation of operations) {
+          if (matchingOperation.path === operation.path) mergedIds.add(matchingOperation.clientChangeId);
+        }
+      }
     }
     return mergedIds;
   }
@@ -463,6 +474,7 @@ export class SyncEngine {
       }
     });
     new Notice(`Private Sync: auto-merged conflict in ${operation.path}.`, 10000);
+    await this.reconcileResolvedLocalConflict(operation.path);
     return true;
   }
 
@@ -496,7 +508,54 @@ export class SyncEngine {
       }
     });
     new Notice(`Private Sync: resolved delete conflict in ${operation.path}.`, 10000);
+    await this.reconcileResolvedLocalConflict(operation.path);
     return true;
+  }
+
+  private async reconcileResolvedLocalConflicts(): Promise<void> {
+    const index = this.indexStore.get();
+    const paths = Object.values(index.files)
+      .filter((record) => record.status === "conflict" || record.status === "locked_by_request")
+      .map((record) => record.path);
+    for (const path of paths) await this.reconcileResolvedLocalConflict(path);
+  }
+
+  private async reconcileResolvedLocalConflict(path: string): Promise<void> {
+    const index = this.indexStore.get();
+    const record = index.files[path];
+    if (!record || (record.status !== "conflict" && record.status !== "locked_by_request")) return;
+    if (index.queue.some((operation) => operation.path === path)) return;
+    const pendingConflicts = await this.api.conflicts(this.plugin.settings.vaultId);
+    if (pendingConflicts.conflicts.some((conflict) => conflict.filePath === path)) return;
+
+    const history = await this.api.history(this.plugin.settings.vaultId, path);
+    const current = history.history[0];
+    if (!current) return;
+    if (current.deleted) {
+      const file = this.plugin.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile) return;
+      record.localHash = null;
+      record.size = 0;
+      record.mtime = Date.now();
+      record.serverRevisionId = current.id;
+      record.status = "synced";
+      record.wasSynced = true;
+      await this.indexStore.save();
+      return;
+    }
+
+    const file = this.plugin.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    const content = await this.plugin.app.vault.readBinary(file);
+    const localHash = await sha256(content);
+    if (localHash !== current.contentHash) return;
+    record.localHash = localHash;
+    record.size = file.stat.size;
+    record.mtime = file.stat.mtime;
+    record.serverRevisionId = current.id;
+    record.status = "synced";
+    record.wasSynced = true;
+    await this.indexStore.save();
   }
 
   private async resolveRemoteConflicts(path: string, status: "resolved" | "cancelled", decision: unknown): Promise<void> {

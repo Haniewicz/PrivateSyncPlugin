@@ -28,6 +28,7 @@ export class LocalIndexStore {
 
   async enqueue(operation: PendingOperation): Promise<void> {
     if (this.index.queue.some((queued) => queued.clientChangeId === operation.clientChangeId)) return;
+    this.index.queue = this.index.queue.filter((queued) => queued.path !== operation.path);
     this.index.queue.push(operation);
     const record = this.index.files[operation.path];
     if (record) record.status = operation.type === "delete" ? "deleted_local" : "pending_upload";
