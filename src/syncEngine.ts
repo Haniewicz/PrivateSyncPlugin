@@ -1,10 +1,11 @@
 import { Notice, TFile, normalizePath } from "obsidian";
 import { ApiClient } from "./apiClient";
 import { sha256, uuid } from "./crypto";
-import { chunkSizeBytes, shouldAutoSync, shouldUseChunkedTransfer } from "./filePolicy";
+import { chunkSizeBytes, shouldAutoSyncPath, shouldUseChunkedTransfer } from "./filePolicy";
+import { getLocalFileStat, listLocalCommunityPluginIds, listLocalSyncFiles, readLocalBinary, trashLocalPath, type LocalSyncFile, writeLocalBinary } from "./localFiles";
 import type { LocalIndexStore } from "./localIndex";
 import type PrivateSyncPlugin from "./plugin";
-import { collectCommunityPluginIds, getCommunityPluginId, shouldSyncFile, shouldSyncPath } from "./settingsSyncPolicy";
+import { collectCommunityPluginIds, getCommunityPluginId, shouldSyncPath } from "./settingsSyncPolicy";
 import type { PendingOperation, ServerChange } from "./types";
 import { openVaultConnectionModal } from "./vaultConnectionModal";
 import { buildLocalVaultManifest } from "./vaultManifest";
@@ -89,12 +90,12 @@ export class SyncEngine {
     index.queue = [];
     const response = await this.api.getChanges(this.plugin.settings.vaultId, 0);
     for (const change of response.changes) {
-      const file = this.plugin.app.vault.getAbstractFileByPath(change.path);
+      const stat = await getLocalFileStat(this.plugin, change.path);
       index.files[change.path] = {
         path: change.path,
         localHash: change.deleted ? null : change.contentHash,
         size: change.deleted ? 0 : change.size,
-        mtime: file instanceof TFile ? file.stat.mtime : Date.now(),
+        mtime: stat?.mtime ?? Date.now(),
         serverRevisionId: change.fileRevisionId,
         status: "synced",
         wasSynced: true
@@ -158,13 +159,13 @@ export class SyncEngine {
     const index = this.indexStore.get();
     const remotePaths = new Set(snapshot.files.keys());
     const remotePluginIds = collectCommunityPluginIds(remotePaths, this.plugin.app.vault.configDir);
-    const localPluginIds = this.getLocalCommunityPluginIds();
+    const localPluginIds = await this.getLocalCommunityPluginIds();
 
-    for (const file of this.getSyncableLocalFiles()) {
+    for (const file of await this.getSyncableLocalFiles()) {
       const path = normalizePath(file.path);
-      if (this.shouldKeepLocalPluginPath(path, remotePluginIds)) continue;
+      if (this.shouldKeepLocalPluginPath(path, remotePluginIds, localPluginIds)) continue;
       if (!remotePaths.has(path)) {
-        await this.plugin.app.fileManager.trashFile(file);
+        await trashLocalPath(this.plugin, path);
       }
     }
 
@@ -199,20 +200,21 @@ export class SyncEngine {
     const seen = new Set<string>();
     const remotePluginIds = collectCommunityPluginIds(snapshot.files.keys(), this.plugin.app.vault.configDir);
     const replaceRemotePlugins = this.plugin.settings.replaceRemoteCommunityPluginsWithLocal;
+    const localPluginIds = await this.getLocalCommunityPluginIds();
 
-    for (const file of this.getSyncableLocalFiles()) {
+    for (const file of await this.getSyncableLocalFiles()) {
       const path = normalizePath(file.path);
       if (this.shouldSkipLocalPluginUpload(path, remotePluginIds, replaceRemotePlugins)) continue;
       seen.add(path);
-      const content = await this.plugin.app.vault.readBinary(file);
+      const content = await readLocalBinary(this.plugin, path);
       const localHash = await sha256(content);
       const remote = snapshot.files.get(path);
-      const isAlreadySynced = remote?.contentHash === localHash && remote.size === file.stat.size;
+      const isAlreadySynced = remote?.contentHash === localHash && remote.size === file.size;
       index.files[path] = {
         path,
         localHash,
-        size: file.stat.size,
-        mtime: file.stat.mtime,
+        size: file.size,
+        mtime: file.mtime,
         serverRevisionId: remote?.fileRevisionId ?? null,
         status: isAlreadySynced ? "synced" : "dirty_local",
         wasSynced: isAlreadySynced
@@ -225,7 +227,7 @@ export class SyncEngine {
     for (const [path, remote] of snapshot.files) {
       if (seen.has(path)) continue;
       if (!shouldSyncPath(path, this.plugin.settings, this.plugin.app.vault.configDir)) continue;
-      if (this.shouldSkipRemotePluginDelete(path, replaceRemotePlugins)) continue;
+      if (this.shouldSkipRemotePluginDelete(path, replaceRemotePlugins, localPluginIds)) continue;
       await this.indexStore.enqueue({
         clientChangeId: uuid(),
         type: "delete",
@@ -246,18 +248,19 @@ export class SyncEngine {
   async scanLocalChanges(): Promise<void> {
     const index = this.indexStore.get();
     const seen = new Set<string>();
-    const files = this.plugin.app.vault.getFiles();
+    const files = await this.getAllLocalFilesForScan();
     const remotePluginIds = await this.getRemoteCommunityPluginIdsForLocalScan();
+    const localPluginIds = await this.getLocalCommunityPluginIds();
     for (const file of files) {
       const path = normalizePath(file.path);
       seen.add(path);
-      if (!shouldSyncFile(file, this.plugin.settings, this.plugin.app.vault.configDir) || this.shouldSkipLocalPluginUpload(path, remotePluginIds, false) || !shouldAutoSync(file, this.plugin.settings)) {
+      if (this.shouldSkipLocalPluginUpload(path, remotePluginIds, false) || !this.isSyncableLocalFile(file)) {
         const previous = index.files[path];
         index.files[path] = {
           path,
           localHash: previous?.localHash ?? null,
-          size: file.stat.size,
-          mtime: file.stat.mtime,
+          size: file.size,
+          mtime: file.mtime,
           serverRevisionId: previous?.serverRevisionId ?? null,
           status: "ignored",
           wasSynced: previous?.wasSynced ?? false
@@ -265,17 +268,17 @@ export class SyncEngine {
         continue;
       }
       const previous = index.files[path];
-      if (previous && previous.size === file.stat.size && previous.mtime === file.stat.mtime && previous.status === "synced") {
+      if (previous && previous.size === file.size && previous.mtime === file.mtime && previous.status === "synced") {
         continue;
       }
-      const content = await this.plugin.app.vault.readBinary(file);
+      const content = await readLocalBinary(this.plugin, path);
       const localHash = await sha256(content);
       if (!previous) {
         index.files[path] = {
           path,
           localHash,
-          size: file.stat.size,
-          mtime: file.stat.mtime,
+          size: file.size,
+          mtime: file.mtime,
           serverRevisionId: null,
           status: "dirty_local",
           wasSynced: false
@@ -283,8 +286,8 @@ export class SyncEngine {
         await this.enqueueFile(file, "create", null, localHash);
       } else if (previous.localHash !== localHash && previous.status !== "conflict" && previous.status !== "locked_by_request") {
         previous.localHash = localHash;
-        previous.size = file.stat.size;
-        previous.mtime = file.stat.mtime;
+        previous.size = file.size;
+        previous.mtime = file.mtime;
         previous.status = "dirty_local";
         await this.enqueueFile(file, previous.wasSynced ? "update" : "create", previous.serverRevisionId, localHash);
       }
@@ -292,7 +295,7 @@ export class SyncEngine {
 
     for (const [path, record] of Object.entries(index.files)) {
       const hasQueuedOperation = index.queue.some((operation) => operation.path === path);
-      const protectedPluginPath = this.shouldSkipRemotePluginDelete(path, false);
+      const protectedPluginPath = this.shouldSkipRemotePluginDelete(path, false, localPluginIds);
       if (
         !seen.has(path) &&
         shouldSyncPath(path, this.plugin.settings, this.plugin.app.vault.configDir) &&
@@ -331,17 +334,17 @@ export class SyncEngine {
         batchOperations.push(operation);
         continue;
       }
-      const file = this.plugin.app.vault.getAbstractFileByPath(operation.path);
-      if (!(file instanceof TFile)) continue;
-      const content = await this.plugin.app.vault.readBinary(file);
+      const stat = await getLocalFileStat(this.plugin, operation.path);
+      if (!stat) continue;
+      const content = await readLocalBinary(this.plugin, operation.path);
       const contentHash = await sha256(content);
       operation.contentHash = contentHash;
       operation.size = content.byteLength;
       const record = index.files[operation.path];
       if (record) {
         record.localHash = contentHash;
-        record.size = file.stat.size;
-        record.mtime = file.stat.mtime;
+        record.size = stat.size;
+        record.mtime = stat.mtime;
       }
       uploadPayloads.set(operation.clientChangeId, content);
       batchOperations.push(operation);
@@ -423,7 +426,7 @@ export class SyncEngine {
   async pullChanges(): Promise<void> {
     const index = this.indexStore.get();
     const response = await this.api.getChanges(this.plugin.settings.vaultId, index.lastAppliedRevision);
-    const localPluginIds = this.getLocalCommunityPluginIds();
+    const localPluginIds = await this.getLocalCommunityPluginIds();
     for (const change of response.changes) {
       await this.applyServerChange(change, localPluginIds);
       index.lastAppliedRevision = Math.max(index.lastAppliedRevision, change.vaultRevision);
@@ -442,8 +445,7 @@ export class SyncEngine {
       const current = history.history[0];
       if (!current) throw new Error("Server version is unavailable.");
       if (current.deleted) {
-        const file = this.plugin.app.vault.getAbstractFileByPath(path);
-        if (file instanceof TFile) await this.plugin.app.fileManager.trashFile(file);
+        await trashLocalPath(this.plugin, path);
         index.files[path] = {
           path,
           localHash: null,
@@ -479,19 +481,27 @@ export class SyncEngine {
       return;
     }
 
-    const file = this.plugin.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof TFile)) throw new Error(`Local file not found: ${path}.`);
+    const stat = await getLocalFileStat(this.plugin, path);
+    if (!stat) throw new Error(`Local file not found: ${path}.`);
     const history = await this.api.history(this.plugin.settings.vaultId, path);
     const current = history.history[0];
-    const content = await this.plugin.app.vault.readBinary(file);
+    const content = await readLocalBinary(this.plugin, path);
     const localHash = await sha256(content);
     record.localHash = localHash;
-    record.size = file.stat.size;
-    record.mtime = file.stat.mtime;
+    record.size = stat.size;
+    record.mtime = stat.mtime;
     record.serverRevisionId = current?.id ?? record.serverRevisionId;
     record.status = "dirty_local";
     await this.indexStore.removePathFromQueue(path);
-    await this.enqueueFile(file, record.wasSynced ? "update" : "create", current?.id ?? record.serverRevisionId, localHash);
+    await this.indexStore.enqueue({
+      clientChangeId: uuid(),
+      type: record.wasSynced ? "update" : "create",
+      path,
+      baseRevisionId: current?.id ?? record.serverRevisionId,
+      contentHash: localHash,
+      size: stat.size,
+      detectedAt: new Date().toISOString()
+    });
     await this.pushQueue();
     await this.pullChanges();
     await this.resolveRemoteConflicts(path, "resolved", { strategy });
@@ -505,7 +515,7 @@ export class SyncEngine {
     new Notice(`Private Sync: kept local version for ${path}.`, 8000);
   }
 
-  private async applyServerChange(change: ServerChange, localPluginIds = this.getLocalCommunityPluginIds()): Promise<void> {
+  private async applyServerChange(change: ServerChange, localPluginIds: Set<string>): Promise<void> {
     const index = this.indexStore.get();
     const record = index.files[change.path];
     if (!shouldSyncPath(change.path, this.plugin.settings, this.plugin.app.vault.configDir)) return;
@@ -528,8 +538,7 @@ export class SyncEngine {
       return;
     }
     if (change.deleted) {
-      const file = this.plugin.app.vault.getAbstractFileByPath(change.path);
-      if (file instanceof TFile) await this.plugin.app.fileManager.trashFile(file);
+      await trashLocalPath(this.plugin, change.path);
       index.files[change.path] = {
         path: change.path,
         localHash: null,
@@ -571,18 +580,36 @@ export class SyncEngine {
     return { files, latestRevision };
   }
 
-  private getSyncableLocalFiles(): TFile[] {
-    return this.plugin.app.vault.getFiles().filter((file) => {
-      const path = normalizePath(file.path);
-      return shouldSyncFile(file, this.plugin.settings, this.plugin.app.vault.configDir) && shouldAutoSync(file, this.plugin.settings);
-    });
+  private async getSyncableLocalFiles(): Promise<LocalSyncFile[]> {
+    return listLocalSyncFiles(this.plugin);
   }
 
-  private getLocalCommunityPluginIds(): Set<string> {
-    return collectCommunityPluginIds(
-      this.plugin.app.vault.getFiles().map((file) => normalizePath(file.path)),
-      this.plugin.app.vault.configDir
-    );
+  private async getAllLocalFilesForScan(): Promise<LocalSyncFile[]> {
+    const files = new Map<string, LocalSyncFile>();
+    for (const file of this.plugin.app.vault.getFiles()) {
+      const path = normalizePath(file.path);
+      files.set(path, {
+        path,
+        size: file.stat.size,
+        mtime: file.stat.mtime,
+        file
+      });
+    }
+    for (const file of await listLocalSyncFiles(this.plugin)) {
+      files.set(file.path, file);
+    }
+    return [...files.values()];
+  }
+
+  private isSyncableLocalFile(file: LocalSyncFile): boolean {
+    return shouldSyncPath(file.path, this.plugin.settings, this.plugin.app.vault.configDir) && shouldAutoSyncPath(file.path, file.size, this.plugin.settings);
+  }
+
+  private async getLocalCommunityPluginIds(): Promise<Set<string>> {
+    const ids = await listLocalCommunityPluginIds(this.plugin);
+    for (const pluginId of collectCommunityPluginIds(Object.keys(this.indexStore.get().files), this.plugin.app.vault.configDir)) ids.add(pluginId);
+    for (const pluginId of collectCommunityPluginIds(this.plugin.app.vault.getFiles().map((file) => normalizePath(file.path)), this.plugin.app.vault.configDir)) ids.add(pluginId);
+    return ids;
   }
 
   private async getRemoteCommunityPluginIdsForLocalScan(): Promise<Set<string>> {
@@ -598,47 +625,40 @@ export class SyncEngine {
     return Boolean(pluginId && remotePluginIds.has(pluginId));
   }
 
-  private shouldKeepLocalPluginPath(path: string, remotePluginIds?: Set<string>, localPluginIds = this.getLocalCommunityPluginIds()): boolean {
+  private shouldKeepLocalPluginPath(path: string, remotePluginIds: Set<string> | undefined, localPluginIds: Set<string>): boolean {
     if (!this.plugin.settings.syncObsidianSettings || !this.plugin.settings.syncCommunityPlugins) return false;
     const pluginId = getCommunityPluginId(path, this.plugin.app.vault.configDir);
     if (!pluginId) return false;
     return localPluginIds.has(pluginId) && (!remotePluginIds || remotePluginIds.has(pluginId));
   }
 
-  private shouldSkipRemotePluginDelete(path: string, allowReplaceRemotePlugins: boolean): boolean {
+  private shouldSkipRemotePluginDelete(path: string, allowReplaceRemotePlugins: boolean, localPluginIds: Set<string>): boolean {
     if (!this.plugin.settings.syncObsidianSettings || !this.plugin.settings.syncCommunityPlugins) return false;
     if (allowReplaceRemotePlugins) return false;
     const pluginId = getCommunityPluginId(path, this.plugin.app.vault.configDir);
-    return Boolean(pluginId && this.getLocalCommunityPluginIds().has(pluginId));
+    return Boolean(pluginId && localPluginIds.has(pluginId));
   }
 
-  private async enqueueFile(file: TFile, type: "create" | "update", baseRevisionId: number | null, contentHash: string): Promise<void> {
+  private async enqueueFile(file: LocalSyncFile, type: "create" | "update", baseRevisionId: number | null, contentHash: string): Promise<void> {
     await this.indexStore.enqueue({
       clientChangeId: uuid(),
       type,
       path: file.path,
       baseRevisionId,
       contentHash,
-      size: file.stat.size,
+      size: file.size,
       detectedAt: new Date().toISOString()
     });
   }
 
   private async writeFile(path: string, content: ArrayBuffer): Promise<void> {
-    const existing = this.plugin.app.vault.getAbstractFileByPath(path);
-    if (existing instanceof TFile) {
-      await this.plugin.app.vault.modifyBinary(existing, content);
-      return;
-    }
-    const parent = path.split("/").slice(0, -1).join("/");
-    if (parent) await this.plugin.app.vault.createFolder(parent).catch(() => undefined);
-    await this.plugin.app.vault.createBinary(path, content);
+    await writeLocalBinary(this.plugin, path, content);
   }
 
   private async hasUnindexedLocalChange(path: string, indexedHash: string | null): Promise<boolean> {
-    const file = this.plugin.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof TFile)) return false;
-    const content = await this.plugin.app.vault.readBinary(file);
+    const stat = await getLocalFileStat(this.plugin, path);
+    if (!stat) return false;
+    const content = await readLocalBinary(this.plugin, path);
     const currentHash = await sha256(content);
     return currentHash !== indexedHash;
   }
@@ -676,7 +696,7 @@ export class SyncEngine {
 
     const [serverContent, localContent, baseContent] = await Promise.all([
       this.api.download(this.plugin.settings.vaultId, operation.path),
-      this.plugin.app.vault.readBinary(file),
+      readLocalBinary(this.plugin, operation.path),
       operation.baseRevisionId ? this.api.downloadRevision(this.plugin.settings.vaultId, operation.baseRevisionId).catch(() => null) : null
     ]);
     const serverText = decodeUtf8(serverContent);
@@ -797,14 +817,14 @@ export class SyncEngine {
       return;
     }
 
-    const file = this.plugin.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof TFile)) return;
-    const content = await this.plugin.app.vault.readBinary(file);
+    const stat = await getLocalFileStat(this.plugin, path);
+    if (!stat) return;
+    const content = await readLocalBinary(this.plugin, path);
     const localHash = await sha256(content);
     if (localHash !== current.contentHash) return;
     record.localHash = localHash;
-    record.size = file.stat.size;
-    record.mtime = file.stat.mtime;
+    record.size = stat.size;
+    record.mtime = stat.mtime;
     record.serverRevisionId = current.id;
     record.status = "synced";
     record.wasSynced = true;

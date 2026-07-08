@@ -1,22 +1,17 @@
-import { normalizePath, TFile } from "obsidian";
 import { sha256, sha256Text } from "./crypto";
-import { shouldAutoSync } from "./filePolicy";
-import { shouldSyncFile } from "./settingsSyncPolicy";
+import { listLocalSyncFiles, readLocalBinary } from "./localFiles";
 import type PrivateSyncPlugin from "./plugin";
 import type { VaultManifest } from "./types";
 
 export async function buildLocalVaultManifest(plugin: PrivateSyncPlugin): Promise<VaultManifest> {
   const entries: Array<{ path: string; contentHash: string; size: number }> = [];
   let totalSize = 0;
-  for (const file of plugin.app.vault.getFiles()) {
-    if (!(file instanceof TFile)) continue;
-    const path = normalizePath(file.path);
-    if (!shouldSyncFile(file, plugin.settings, plugin.app.vault.configDir)) continue;
-    if (!shouldAutoSync(file, plugin.settings)) continue;
-    const content = await plugin.app.vault.readBinary(file);
+  for (const file of await listLocalSyncFiles(plugin)) {
+    const path = file.path;
+    const content = await readLocalBinary(plugin, path);
     const contentHash = await sha256(content);
-    entries.push({ path, contentHash, size: file.stat.size });
-    totalSize += file.stat.size;
+    entries.push({ path, contentHash, size: file.size });
+    totalSize += file.size;
   }
   entries.sort((left, right) => left.path.localeCompare(right.path));
   return {
