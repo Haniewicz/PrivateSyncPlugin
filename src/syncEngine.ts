@@ -817,16 +817,20 @@ export class SyncEngine {
     const current = history.history[0];
     if (!current || current.deleted) return false;
 
+    if (!operation.baseRevisionId) return false;
+
     const [serverContent, localContent, baseContent] = await Promise.all([
       this.api.download(this.plugin.settings.vaultId, operation.path),
       readLocalBinary(this.plugin, operation.path),
-      operation.baseRevisionId ? this.api.downloadRevision(this.plugin.settings.vaultId, operation.baseRevisionId).catch(() => null) : null
+      this.api.downloadRevision(this.plugin.settings.vaultId, operation.baseRevisionId).catch(() => null)
     ]);
+    if (!baseContent) return false;
+
     const serverText = decodeUtf8(serverContent);
     const localText = decodeUtf8(localContent);
-    const baseText = baseContent ? decodeUtf8(baseContent) : null;
-    const merge = mergeServerWithUniqueLocal(serverText, localText, baseText);
-    if (!merge) return false;
+    const baseText = decodeUtf8(baseContent);
+    const merge = mergeTextThreeWay(baseText, localText, serverText);
+    if (!merge || merge.hasConflicts) return false;
 
     const mergedContent = encodeUtf8(merge.text);
     await this.writeFile(operation.path, mergedContent);
@@ -841,7 +845,9 @@ export class SyncEngine {
       wasSynced: true
     };
     await this.indexStore.removePathFromQueue(operation.path);
-    if (merge.appendedLineCount > 0) {
+    if (mergedHash === current.contentHash) {
+      index.files[operation.path].status = "synced";
+    } else {
       await this.indexStore.enqueue({
         clientChangeId: uuid(),
         type: "update",
@@ -851,12 +857,9 @@ export class SyncEngine {
         size: mergedContent.byteLength,
         detectedAt: new Date().toISOString()
       });
-    } else {
-      index.files[operation.path].status = "synced";
     }
     await this.resolveRemoteConflicts(operation.path, "resolved", {
-      strategy: "auto_merge_unique_local",
-      appendedLineCount: merge.appendedLineCount,
+      strategy: "three_way_auto_merge",
       serverRevisionId: current.id
     });
     await this.plugin.recordSyncEvent({
@@ -864,8 +867,7 @@ export class SyncEngine {
       path: operation.path,
       message: `Auto-merged conflict in ${operation.path}`,
       details: {
-        strategy: "auto_merge_unique_local",
-        appendedLineCount: merge.appendedLineCount,
+        strategy: "three_way_auto_merge",
         serverRevisionId: current.id
       }
     });
@@ -1198,34 +1200,6 @@ function applyChangesToRange(baseLines: string[], start: number, end: number, ch
 function sameLines(left: string[], right: string[]): boolean {
   if (left.length !== right.length) return false;
   return left.every((line, index) => line === right[index]);
-}
-
-function mergeServerWithUniqueLocal(serverText: string, localText: string, baseText: string | null): { text: string; appendedLineCount: number } | null {
-  if (serverText === localText) return { text: serverText, appendedLineCount: 0 };
-  if (!localText.trim()) return { text: serverText, appendedLineCount: 0 };
-  const serverLines = splitLines(serverText);
-  const localLines = splitLines(localText);
-  const serverLineSet = new Set(serverLines.map((line) => line.trim()).filter(Boolean));
-  if (baseText !== null) {
-    const baseLineSet = new Set(splitLines(baseText).map((line) => line.trim()).filter(Boolean));
-    const localLineSet = new Set(localLines.map((line) => line.trim()).filter(Boolean));
-    const localRemovedBaseLineStillOnServer = Array.from(baseLineSet).some((line) => serverLineSet.has(line) && !localLineSet.has(line));
-    const localHasNewLine = localLines.some((line) => {
-      const normalized = line.trim();
-      return normalized && !baseLineSet.has(normalized) && !serverLineSet.has(normalized);
-    });
-    if (localRemovedBaseLineStillOnServer && localHasNewLine) return null;
-  }
-  const uniqueLocalLines = localLines.filter((line) => {
-    const normalized = line.trim();
-    return normalized && !serverLineSet.has(normalized);
-  });
-  if (uniqueLocalLines.length === 0) return { text: serverText, appendedLineCount: 0 };
-  const separator = serverText.endsWith("\n") || serverText.length === 0 ? "" : "\n";
-  return {
-    text: `${serverText}${separator}${uniqueLocalLines.join("\n")}`,
-    appendedLineCount: uniqueLocalLines.length
-  };
 }
 
 function splitLines(text: string): string[] {
