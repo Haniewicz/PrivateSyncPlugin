@@ -555,9 +555,7 @@ export class SyncEngine {
       };
       return;
     }
-    const content = shouldUseChunkedTransfer(change.size, this.plugin.settings)
-      ? await this.api.downloadChunked(this.plugin.settings.vaultId, change.path, change.size, chunkSizeBytes(this.plugin.settings))
-      : await this.api.download(this.plugin.settings.vaultId, change.path);
+    const content = await this.api.downloadRevision(this.plugin.settings.vaultId, change.fileRevisionId);
     await this.writeFile(change.path, content);
     index.files[change.path] = {
       path: change.path,
