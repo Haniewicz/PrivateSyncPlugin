@@ -462,7 +462,7 @@ export class SyncEngine {
     if (queuedUpload) await this.pushQueue();
   }
 
-  async resolveLocalConflict(path: string, strategy: "keep_local" | "use_server"): Promise<void> {
+  async resolveLocalConflict(path: string, strategy: "keep_local" | "use_server", conflictId?: string): Promise<void> {
     if (this.plugin.handleOfflineSyncAttempt()) return;
     const index = this.indexStore.get();
     const record = index.files[path];
@@ -497,12 +497,13 @@ export class SyncEngine {
         };
       }
       await this.indexStore.save();
-      await this.resolveRemoteConflicts(path, "cancelled", { strategy });
+      await this.resolveRemoteConflicts(path, "cancelled", { strategy }, conflictId);
+      await this.keepLocalConflictStatusIfPending(path);
       await this.plugin.recordSyncEvent({
         type: "manual_resolution",
         path,
         message: `Used server version for ${path}`,
-        details: { strategy }
+        details: { strategy, conflictId }
       });
       new Notice(`Private Sync: using server version for ${path}.`, 8000);
       this.plugin.refreshView();
@@ -532,12 +533,13 @@ export class SyncEngine {
     });
     await this.pushQueue();
     await this.pullChanges();
-    await this.resolveRemoteConflicts(path, "resolved", { strategy });
+    await this.resolveRemoteConflicts(path, "resolved", { strategy }, conflictId);
+    await this.keepLocalConflictStatusIfPending(path);
     await this.plugin.recordSyncEvent({
       type: "manual_resolution",
       path,
       message: `Kept local version for ${path}`,
-      details: { strategy }
+      details: { strategy, conflictId }
     });
     this.plugin.refreshView();
     new Notice(`Private Sync: kept local version for ${path}.`, 8000);
@@ -956,12 +958,23 @@ export class SyncEngine {
     await this.indexStore.save();
   }
 
-  private async resolveRemoteConflicts(path: string, status: "resolved" | "cancelled", decision: unknown): Promise<void> {
+  private async resolveRemoteConflicts(path: string, status: "resolved" | "cancelled", decision: unknown, conflictId?: string): Promise<void> {
     const response = await this.api.conflicts(this.plugin.settings.vaultId);
-    const conflicts = response.conflicts.filter((conflict) => conflict.filePath === path);
+    const conflicts = conflictId
+      ? response.conflicts.filter((conflict) => conflict.id === conflictId)
+      : response.conflicts.filter((conflict) => conflict.filePath === path);
     for (const conflict of conflicts) {
       await this.api.resolveConflict(this.plugin.settings.vaultId, conflict.id, status, decision);
     }
+  }
+
+  private async keepLocalConflictStatusIfPending(path: string): Promise<void> {
+    const response = await this.api.conflicts(this.plugin.settings.vaultId);
+    if (!response.conflicts.some((conflict) => conflict.filePath === path)) return;
+    const record = this.indexStore.get().files[path];
+    if (!record) return;
+    record.status = "conflict";
+    await this.indexStore.save();
   }
 
   private async recordSyncStateIfComplete(): Promise<void> {

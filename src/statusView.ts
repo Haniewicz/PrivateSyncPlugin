@@ -17,10 +17,17 @@ export const PRIVATE_SYNC_VIEW = "private-sync-view";
 
 type Tab = "status" | "devices" | "requests" | "conflicts" | "history" | "events";
 
+type ConflictListItem = {
+  key: string;
+  path: string;
+  local?: LocalFileRecord;
+  remote?: ServerConflict;
+};
+
 export class PrivateSyncView extends ItemView {
   private activeTab: Tab = "status";
   private historyPath = "";
-  private selectedConflictPaths = new Set<string>();
+  private selectedConflictKeys = new Set<string>();
   private ignoredExpanded = false;
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: PrivateSyncPlugin) {
@@ -112,31 +119,28 @@ export class PrivateSyncView extends ItemView {
   }
 
   private renderConflicts(root: Element): void {
-    const list = root.createDiv({ cls: "private-sync-list" });
+    const conflictRoot = root.createDiv({ cls: "private-sync-conflict-panel" });
     const localConflicts = Object.values(this.plugin.indexStore.get().files).filter(
       (file) => file.status === "conflict" || file.status === "locked_by_request"
     );
-    const visiblePaths = new Set(localConflicts.map((conflict) => conflict.path));
-    for (const path of [...this.selectedConflictPaths]) {
-      if (!visiblePaths.has(path)) this.selectedConflictPaths.delete(path);
-    }
-    this.conflictBulkToolbar(root, localConflicts);
-    for (const conflict of localConflicts) this.localConflictRow(list, conflict);
+    conflictRoot.createDiv({ text: "Loading conflicts", cls: "private-sync-muted" });
     this.plugin.api
       .conflicts(this.plugin.settings.vaultId)
       .then((response) => {
-        const remoteOnly = response.conflicts.filter((conflict) => !localConflicts.some((local) => local.path === conflict.filePath));
-        if (localConflicts.length === 0 && remoteOnly.length === 0) {
-          list.empty();
-          this.row(list, "Status", "no conflicts");
-          return;
-        }
-        for (const conflict of remoteOnly) this.remoteConflictRow(list, conflict);
+        this.renderConflictItems(conflictRoot, localConflicts, response.conflicts);
       })
       .catch((error) => {
-        if (localConflicts.length === 0) this.row(list, "Error", error.message);
+        conflictRoot.empty();
+        const items = localConflicts.map((conflict) => localConflictItem(conflict));
+        this.pruneSelectedConflicts(items);
+        this.conflictBulkToolbar(conflictRoot, items);
+        const list = conflictRoot.createDiv({ cls: "private-sync-list" });
+        if (items.length === 0) {
+          this.row(list, "Error", error.message);
+          return;
+        }
+        for (const item of items) this.conflictRow(list, item);
       });
-    if (localConflicts.length === 0) this.row(list, "Loading", "conflicts");
   }
 
   private renderRequests(root: Element): void {
@@ -284,27 +288,47 @@ export class PrivateSyncView extends ItemView {
     }
   }
 
-  private conflictBulkToolbar(root: Element, conflicts: LocalFileRecord[]): void {
+  private renderConflictItems(root: Element, localConflicts: LocalFileRecord[], remoteConflicts: ServerConflict[]): void {
+    root.empty();
+    const items = buildConflictItems(localConflicts, remoteConflicts);
+    this.pruneSelectedConflicts(items);
+    this.conflictBulkToolbar(root, items);
+    const list = root.createDiv({ cls: "private-sync-list" });
+    if (items.length === 0) {
+      this.row(list, "Status", "no conflicts");
+      return;
+    }
+    for (const item of items) this.conflictRow(list, item);
+  }
+
+  private pruneSelectedConflicts(items: ConflictListItem[]): void {
+    const visibleKeys = new Set(items.map((item) => item.key));
+    for (const key of [...this.selectedConflictKeys]) {
+      if (!visibleKeys.has(key)) this.selectedConflictKeys.delete(key);
+    }
+  }
+
+  private conflictBulkToolbar(root: Element, conflicts: ConflictListItem[]): void {
     const toolbar = root.createDiv({ cls: "private-sync-toolbar private-sync-bulk-toolbar" });
-    toolbar.createDiv({ text: `${this.selectedConflictPaths.size}/${conflicts.length} selected`, cls: "private-sync-muted private-sync-bulk-count" });
+    toolbar.createDiv({ text: `${this.selectedConflictKeys.size}/${conflicts.length} selected`, cls: "private-sync-muted private-sync-bulk-count" });
     const selectAll = this.actionButton(toolbar, "Select all", "subtle");
     selectAll.disabled = conflicts.length === 0;
     selectAll.onclick = () => {
-      this.selectedConflictPaths = new Set(conflicts.map((conflict) => conflict.path));
+      this.selectedConflictKeys = new Set(conflicts.map((conflict) => conflict.key));
       this.render();
     };
     const clear = this.actionButton(toolbar, "Clear", "subtle");
-    clear.disabled = this.selectedConflictPaths.size === 0;
+    clear.disabled = this.selectedConflictKeys.size === 0;
     clear.onclick = () => {
-      this.selectedConflictPaths.clear();
+      this.selectedConflictKeys.clear();
       this.render();
     };
     const keepLocal = this.actionButton(toolbar, "Keep local", "success");
-    keepLocal.disabled = this.selectedConflictPaths.size === 0;
-    keepLocal.onclick = () => this.resolveSelectedConflicts("keep_local");
+    keepLocal.disabled = this.selectedConflictKeys.size === 0;
+    keepLocal.onclick = () => this.resolveSelectedConflicts(conflicts, "keep_local");
     const useServer = this.actionButton(toolbar, "Use server", "info");
-    useServer.disabled = this.selectedConflictPaths.size === 0;
-    useServer.onclick = () => this.resolveSelectedConflicts("use_server");
+    useServer.disabled = this.selectedConflictKeys.size === 0;
+    useServer.onclick = () => this.resolveSelectedConflicts(conflicts, "use_server");
   }
 
   private requestRow(parent: Element, request: ServerRequest, payload: DevicePairingRequestPayload): void {
@@ -377,62 +401,59 @@ export class PrivateSyncView extends ItemView {
     };
   }
 
-  private localConflictRow(parent: Element, conflict: LocalFileRecord): void {
+  private conflictRow(parent: Element, conflict: ConflictListItem): void {
     const row = parent.createDiv({ cls: "private-sync-row private-sync-conflict-row" });
     const checkbox = row.createEl("input", { type: "checkbox", cls: "private-sync-conflict-checkbox" });
-    checkbox.checked = this.selectedConflictPaths.has(conflict.path);
+    checkbox.checked = this.selectedConflictKeys.has(conflict.key);
     checkbox.onchange = () => {
       if (checkbox.checked) {
-        this.selectedConflictPaths.add(conflict.path);
+        this.selectedConflictKeys.add(conflict.key);
       } else {
-        this.selectedConflictPaths.delete(conflict.path);
+        this.selectedConflictKeys.delete(conflict.key);
       }
       this.render();
     };
     const details = row.createDiv();
     details.createDiv({ text: conflict.path });
-    details.createDiv({ text: conflict.status, cls: "private-sync-muted" });
+    details.createDiv({ text: conflictSummary(conflict), cls: "private-sync-muted" });
     const actions = row.createDiv({ cls: "private-sync-actions" });
     this.actionButton(actions, "Diff", "subtle").onclick = () => this.showConflictDiff(conflict.path);
-    this.actionButton(actions, "Keep local", "success").onclick = () => this.resolveConflict(conflict.path, "keep_local");
-    this.actionButton(actions, "Use server", "info").onclick = () => this.resolveConflict(conflict.path, "use_server");
+    const keepLocal = this.actionButton(actions, "Keep local", "success");
+    keepLocal.disabled = !conflict.local;
+    keepLocal.onclick = () => this.resolveConflict(conflict, "keep_local");
+    this.actionButton(actions, "Use server", "info").onclick = () => this.resolveConflict(conflict, "use_server");
   }
 
-  private remoteConflictRow(parent: Element, conflict: ServerConflict): void {
-    const row = parent.createDiv({ cls: "private-sync-row" });
-    row.createDiv({ text: conflict.filePath });
-    row.createDiv({
-      text: `pending on ${conflict.deviceName ?? conflict.deviceId}`,
-      cls: "private-sync-muted"
-    });
-  }
-
-  private async resolveConflict(path: string, strategy: "keep_local" | "use_server"): Promise<void> {
+  private async resolveConflict(conflict: ConflictListItem, strategy: "keep_local" | "use_server"): Promise<void> {
     try {
-      await this.plugin.syncEngine.resolveLocalConflict(path, strategy);
-      this.selectedConflictPaths.delete(path);
+      await this.plugin.syncEngine.resolveLocalConflict(conflict.path, strategy, conflict.remote?.id);
+      this.selectedConflictKeys.delete(conflict.key);
       this.render();
     } catch (error) {
       new Notice(`Private Sync conflict resolution failed: ${errorMessage(error)}`, 10000);
     }
   }
 
-  private async resolveSelectedConflicts(strategy: "keep_local" | "use_server"): Promise<void> {
-    const paths = [...this.selectedConflictPaths];
-    if (paths.length === 0) return;
+  private async resolveSelectedConflicts(conflicts: ConflictListItem[], strategy: "keep_local" | "use_server"): Promise<void> {
+    const selected = conflicts.filter((conflict) => this.selectedConflictKeys.has(conflict.key));
+    if (selected.length === 0) return;
     let succeeded = 0;
     const failed: string[] = [];
-    for (const path of paths) {
+    for (const conflict of selected) {
+      if (strategy === "keep_local" && !conflict.local) {
+        failed.push(`${conflict.path}: local version is unavailable`);
+        continue;
+      }
       try {
-        await this.plugin.syncEngine.resolveLocalConflict(path, strategy);
-        this.selectedConflictPaths.delete(path);
+        await this.plugin.syncEngine.resolveLocalConflict(conflict.path, strategy, conflict.remote?.id);
+        this.selectedConflictKeys.delete(conflict.key);
         succeeded += 1;
       } catch (error) {
-        failed.push(`${path}: ${errorMessage(error)}`);
+        failed.push(`${conflict.path}: ${errorMessage(error)}`);
       }
     }
     if (failed.length > 0) {
-      new Notice(`Private Sync: resolved ${succeeded}/${paths.length} conflicts. Failed: ${failed.slice(0, 3).join("; ")}`, 15000);
+      new Notice(`Private Sync: resolved ${succeeded}/${selected.length} conflicts. Failed: ${failed.slice(0, 3).join("; ")}`, 15000);
     } else {
       new Notice(`Private Sync: resolved ${succeeded} conflicts.`, 8000);
     }
@@ -519,6 +540,38 @@ export class PrivateSyncView extends ItemView {
 
 function label(tab: Tab): string {
   return tab.slice(0, 1).toUpperCase() + tab.slice(1);
+}
+
+function buildConflictItems(localConflicts: LocalFileRecord[], remoteConflicts: ServerConflict[]): ConflictListItem[] {
+  const localByPath = new Map(localConflicts.map((conflict) => [conflict.path, conflict]));
+  const remotePaths = new Set(remoteConflicts.map((conflict) => conflict.filePath));
+  const items: ConflictListItem[] = remoteConflicts.map((conflict) => ({
+    key: `remote:${conflict.id}`,
+    path: conflict.filePath,
+    local: localByPath.get(conflict.filePath),
+    remote: conflict
+  }));
+  for (const conflict of localConflicts) {
+    if (remotePaths.has(conflict.path)) continue;
+    items.push(localConflictItem(conflict));
+  }
+  return items;
+}
+
+function localConflictItem(conflict: LocalFileRecord): ConflictListItem {
+  return {
+    key: `local:${conflict.path}`,
+    path: conflict.path,
+    local: conflict
+  };
+}
+
+function conflictSummary(conflict: ConflictListItem): string {
+  if (!conflict.remote) return conflict.local?.status ?? "local conflict";
+  const owner = conflict.remote.deviceName ?? conflict.remote.deviceId;
+  const created = new Date(conflict.remote.createdAt);
+  const createdText = Number.isNaN(created.getTime()) ? conflict.remote.createdAt : created.toLocaleString();
+  return `pending conflict ${conflict.remote.id} from ${owner} · ${createdText}`;
 }
 
 function errorMessage(error: unknown): string {
