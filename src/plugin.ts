@@ -122,6 +122,20 @@ export default class PrivateSyncPlugin extends Plugin {
     this.refreshView();
   }
 
+  async recordErrorEvent(message: string, error: unknown): Promise<void> {
+    await this.recordSyncEvent({
+      type: "error",
+      message: `${message}: ${errorMessage(error)}`,
+      details: errorDetails(error)
+    });
+  }
+
+  async clearSyncEvents(predicate?: (event: SyncEvent) => boolean): Promise<void> {
+    this.events = predicate ? this.events.filter((event) => !predicate(event)) : [];
+    await this.savePluginData({ events: this.events });
+    this.refreshView();
+  }
+
   refreshView(): void {
     for (const leaf of this.app.workspace.getLeavesOfType(PRIVATE_SYNC_VIEW)) {
       const view = leaf.view;
@@ -139,11 +153,8 @@ export default class PrivateSyncPlugin extends Plugin {
       }
       this.refreshView();
     } catch (error) {
-      await this.recordSyncEvent({
-        type: "error",
-        message: `Cannot load pairing requests: ${(error as Error).message}`
-      });
-      new Notice(`Private Sync: cannot load pairing requests: ${(error as Error).message}`, 10000);
+      await this.recordErrorEvent("Cannot load pairing requests", error);
+      new Notice(`Private Sync: cannot load pairing requests: ${errorMessage(error)}`, 10000);
     }
   }
 
@@ -167,11 +178,8 @@ export default class PrivateSyncPlugin extends Plugin {
     try {
       await this.syncEngine.syncNow();
     } catch (error) {
-      await this.recordSyncEvent({
-        type: "error",
-        message: `Sync failed: ${(error as Error).message}`
-      });
-      new Notice(`Private Sync: ${(error as Error).message}`);
+      await this.recordErrorEvent("Sync failed", error);
+      new Notice(`Private Sync: ${errorMessage(error)}`);
     }
   }, 1500);
 
@@ -345,6 +353,21 @@ function debounce<T extends (...args: never[]) => void | Promise<void>>(fn: T, d
     window.clearTimeout(timeout);
     timeout = window.setTimeout(() => void fn(...args), delay);
   }) as T;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function errorDetails(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack
+    };
+  }
+  return { value: String(error) };
 }
 
 function parseServerEvent(data: unknown): { type?: string } {

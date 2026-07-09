@@ -9,7 +9,8 @@ import type {
   LocalFileRecord,
   RemoteDevice,
   ServerConflict,
-  ServerRequest
+  ServerRequest,
+  SyncEvent
 } from "./types";
 
 export const PRIVATE_SYNC_VIEW = "private-sync-view";
@@ -47,7 +48,12 @@ export class PrivateSyncView extends ItemView {
     root.addClass("private-sync-view");
 
     const toolbar = root.createDiv({ cls: "private-sync-toolbar" });
-    this.actionButton(toolbar, "Sync now", "primary").onclick = () => this.plugin.syncEngine.syncNow();
+    this.actionButton(toolbar, "Sync now", "primary").onclick = () => {
+      this.plugin.syncEngine.syncNow().catch((error) => {
+        this.plugin.recordErrorEvent("Manual sync failed", error).catch(() => undefined);
+        new Notice(`Private Sync: ${errorMessage(error)}`, 10000);
+      });
+    };
     this.actionButton(toolbar, "Pair", "primary").onclick = () => this.plugin.syncEngine.pairDevice();
 
     const tabs = root.createDiv({ cls: "private-sync-tabs" });
@@ -78,8 +84,8 @@ export class PrivateSyncView extends ItemView {
     this.row(list, "Indexed files", String(files.length));
     this.row(list, "Pending operations", String(index.queue.length));
     this.row(list, "Server vault", this.plugin.settings.vaultLinked ? this.plugin.settings.vaultId : `${this.plugin.settings.vaultId} (not linked)`);
-    for (const status of ["synced", "pending_upload", "conflict", "locked_by_request", "ignored", "failed"]) {
-      this.row(list, status, String(files.filter((file) => file.status === status).length));
+    for (const status of ["synced", "pending_upload", "conflict", "locked_by_request", "ignored", "failed"] as const) {
+      this.row(list, status, statusValue(status, files.filter((file) => file.status === status).length));
     }
   }
 
@@ -204,6 +210,27 @@ export class PrivateSyncView extends ItemView {
   }
 
   private renderEvents(root: Element): void {
+    const controls = root.createDiv({ cls: "private-sync-toolbar" });
+    const errorCount = this.plugin.events.filter((event) => event.type === "error").length;
+    controls.createDiv({
+      text: `${this.plugin.events.length} events · ${errorCount} errors`,
+      cls: "private-sync-muted private-sync-event-count"
+    });
+    const clearErrors = this.actionButton(controls, "Clear errors", "danger");
+    clearErrors.disabled = errorCount === 0;
+    clearErrors.onclick = () => {
+      this.plugin.clearSyncEvents((event) => event.type === "error").catch((error) => {
+        new Notice(`Private Sync: cannot clear error logs: ${errorMessage(error)}`, 10000);
+      });
+    };
+    const clearAll = this.actionButton(controls, "Clear all", "danger");
+    clearAll.disabled = this.plugin.events.length === 0;
+    clearAll.onclick = () => {
+      this.plugin.clearSyncEvents().catch((error) => {
+        new Notice(`Private Sync: cannot clear event logs: ${errorMessage(error)}`, 10000);
+      });
+    };
+
     const list = root.createDiv({ cls: "private-sync-list" });
     if (this.plugin.events.length === 0) {
       this.row(list, "Events", "no sync events");
@@ -214,7 +241,9 @@ export class PrivateSyncView extends ItemView {
       const details = row.createDiv();
       details.createDiv({ text: event.path ? `${event.type}: ${event.path}` : event.type });
       details.createDiv({ text: event.message, cls: "private-sync-muted" });
-      row.createDiv({ text: event.timestamp, cls: "private-sync-muted" });
+      const actions = row.createDiv({ cls: "private-sync-actions" });
+      actions.createDiv({ text: event.timestamp, cls: "private-sync-muted private-sync-event-time" });
+      this.actionButton(actions, "Details", "subtle").onclick = () => this.showEventDetails(event);
     }
   }
 
@@ -448,6 +477,10 @@ export class PrivateSyncView extends ItemView {
     }
   }
 
+  private showEventDetails(event: SyncEvent): void {
+    new TextPreviewModal(this.plugin, `Event: ${event.type}`, eventDetailsPretty(event)).open();
+  }
+
   private actionButton(parent: Element, text: string, tone: "primary" | "success" | "info" | "danger" | "subtle"): HTMLButtonElement {
     return parent.createEl("button", { text, cls: `private-sync-button private-sync-button-${tone}` });
   }
@@ -459,6 +492,27 @@ function label(tab: Tab): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function statusValue(status: string, count: number): string {
+  if (status === "ignored") {
+    return `${count} · skipped by settings, usually too large files or disabled attachment/settings/plugin sync`;
+  }
+  return String(count);
+}
+
+function eventDetailsPretty(event: SyncEvent): string {
+  return JSON.stringify(
+    {
+      timestamp: event.timestamp,
+      type: event.type,
+      path: event.path,
+      message: event.message,
+      details: event.details ?? null
+    },
+    null,
+    2
+  );
 }
 
 function requestLabel(type: string): string {

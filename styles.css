@@ -1,8 +1,10 @@
 .private-sync-view {
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 12px;
+  min-width: 0;
 }
 
 .private-sync-toolbar {
@@ -10,20 +12,24 @@
   gap: 8px;
   flex-wrap: wrap;
   align-items: center;
+  min-width: 0;
 }
 
 .private-sync-tabs {
   display: flex;
   gap: 4px;
+  flex-wrap: wrap;
   border-bottom: 1px solid var(--background-modifier-border);
 }
 
 .private-sync-tab {
+  min-width: 0;
   border: 0;
   border-radius: 0;
   background: transparent;
   padding: 6px 8px;
   color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 
 .private-sync-tab.is-active {
@@ -44,11 +50,19 @@
   padding: 8px;
   border: 1px solid var(--background-modifier-border);
   border-radius: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.private-sync-row > * {
+  min-width: 0;
 }
 
 .private-sync-muted {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+  overflow-wrap: anywhere;
 }
 
 .private-sync-request-row {
@@ -73,6 +87,7 @@
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  min-width: 0;
 }
 
 .private-sync-bulk-toolbar {
@@ -84,10 +99,13 @@
 }
 
 .private-sync-button {
+  max-width: 100%;
   border-radius: 6px;
   border: 1px solid var(--background-modifier-border);
   background: var(--background-secondary);
   color: var(--text-normal);
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .private-sync-button-subtle {
@@ -118,7 +136,15 @@
 }
 
 .private-sync-event-row {
-  grid-template-columns: minmax(0, 1fr) minmax(120px, auto);
+  grid-template-columns: minmax(0, 1fr) minmax(0, auto);
+}
+
+.private-sync-event-count {
+  flex: 1 1 160px;
+}
+
+.private-sync-event-time {
+  flex: 1 1 140px;
 }
 
 .private-sync-status-bar {
@@ -148,4 +174,25 @@
   border-radius: 6px;
   padding: 8px;
   background: var(--background-secondary);
+}
+
+@container (max-width: 360px) {
+  .private-sync-row,
+  .private-sync-request-row,
+  .private-sync-action-row,
+  .private-sync-event-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .private-sync-conflict-row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .private-sync-conflict-row .private-sync-actions {
+    grid-column: 1 / -1;
+  }
+
+  .private-sync-actions {
+    justify-content: flex-start;
+  }
 }
