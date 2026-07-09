@@ -29,7 +29,7 @@
   background: transparent;
   padding: 6px 8px;
   color: var(--text-muted);
-  overflow-wrap: anywhere;
+  white-space: nowrap;
 }
 
 .private-sync-tab.is-active {
@@ -51,7 +51,6 @@
   border: 1px solid var(--background-modifier-border);
   border-radius: 6px;
   min-width: 0;
-  overflow-wrap: anywhere;
   word-break: normal;
 }
 
@@ -62,7 +61,16 @@
 .private-sync-muted {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+}
+
+.private-sync-row-name {
+  white-space: nowrap;
+}
+
+.private-sync-row-value {
+  min-width: 0;
+  overflow-wrap: break-word;
 }
 
 .private-sync-request-row {
@@ -105,7 +113,7 @@
   background: var(--background-secondary);
   color: var(--text-normal);
   white-space: normal;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .private-sync-button-subtle {
@@ -145,6 +153,33 @@
 
 .private-sync-event-time {
   flex: 1 1 140px;
+}
+
+.private-sync-status-count {
+  align-self: center;
+  min-width: 2ch;
+  text-align: right;
+}
+
+.private-sync-ignored-list {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+}
+
+.private-sync-ignored-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  min-width: 0;
+}
+
+.private-sync-ignored-item > :first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .private-sync-status-bar {
@@ -194,5 +229,9 @@
 
   .private-sync-actions {
     justify-content: flex-start;
+  }
+
+  .private-sync-ignored-item {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

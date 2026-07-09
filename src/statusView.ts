@@ -21,6 +21,7 @@ export class PrivateSyncView extends ItemView {
   private activeTab: Tab = "status";
   private historyPath = "";
   private selectedConflictPaths = new Set<string>();
+  private ignoredExpanded = false;
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: PrivateSyncPlugin) {
     super(leaf);
@@ -85,7 +86,12 @@ export class PrivateSyncView extends ItemView {
     this.row(list, "Pending operations", String(index.queue.length));
     this.row(list, "Server vault", this.plugin.settings.vaultLinked ? this.plugin.settings.vaultId : `${this.plugin.settings.vaultId} (not linked)`);
     for (const status of ["synced", "pending_upload", "conflict", "locked_by_request", "ignored", "failed"] as const) {
-      this.row(list, status, statusValue(status, files.filter((file) => file.status === status).length));
+      const matchingFiles = files.filter((file) => file.status === status);
+      if (status === "ignored") {
+        this.ignoredStatusRow(list, matchingFiles);
+      } else {
+        this.row(list, status, String(matchingFiles.length));
+      }
     }
   }
 
@@ -249,8 +255,33 @@ export class PrivateSyncView extends ItemView {
 
   private row(parent: Element, name: string, value: string): void {
     const row = parent.createDiv({ cls: "private-sync-row" });
-    row.createDiv({ text: name });
-    row.createDiv({ text: value, cls: "private-sync-muted" });
+    row.createDiv({ text: name, cls: "private-sync-row-name" });
+    row.createDiv({ text: value, cls: "private-sync-muted private-sync-row-value" });
+  }
+
+  private ignoredStatusRow(parent: Element, files: LocalFileRecord[]): void {
+    const row = parent.createDiv({ cls: "private-sync-row private-sync-action-row" });
+    const details = row.createDiv();
+    details.createDiv({ text: "ignored", cls: "private-sync-row-name" });
+    details.createDiv({
+      text: "Skipped by current sync settings, for example large files, disabled attachments, settings, or community plugins.",
+      cls: "private-sync-muted private-sync-row-value"
+    });
+    const actions = row.createDiv({ cls: "private-sync-actions" });
+    actions.createDiv({ text: String(files.length), cls: "private-sync-muted private-sync-status-count" });
+    const toggle = this.actionButton(actions, this.ignoredExpanded ? "Hide" : "Show", "subtle");
+    toggle.disabled = files.length === 0;
+    toggle.onclick = () => {
+      this.ignoredExpanded = !this.ignoredExpanded;
+      this.render();
+    };
+    if (!this.ignoredExpanded || files.length === 0) return;
+    const ignoredList = parent.createDiv({ cls: "private-sync-ignored-list" });
+    for (const file of files.sort((left, right) => left.path.localeCompare(right.path))) {
+      const item = ignoredList.createDiv({ cls: "private-sync-ignored-item" });
+      item.createDiv({ text: file.path });
+      item.createDiv({ text: `${file.size} B`, cls: "private-sync-muted" });
+    }
   }
 
   private conflictBulkToolbar(root: Element, conflicts: LocalFileRecord[]): void {
@@ -492,13 +523,6 @@ function label(tab: Tab): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function statusValue(status: string, count: number): string {
-  if (status === "ignored") {
-    return `${count} · skipped by settings, usually too large files or disabled attachment/settings/plugin sync`;
-  }
-  return String(count);
 }
 
 function eventDetailsPretty(event: SyncEvent): string {
