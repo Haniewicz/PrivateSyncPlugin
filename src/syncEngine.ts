@@ -15,6 +15,19 @@ type RemoteSnapshot = {
   latestRevision: number;
 };
 
+type ApplyServerChangeResult = "applied" | "queued_upload";
+
+type LineChange = {
+  baseStart: number;
+  baseEnd: number;
+  replacement: string[];
+};
+
+type ThreeWayMergeResult = {
+  text: string;
+  hasConflicts: boolean;
+};
+
 export class SyncEngine {
   private running = false;
 
@@ -432,11 +445,21 @@ export class SyncEngine {
     const index = this.indexStore.get();
     const response = await this.api.getChanges(this.plugin.settings.vaultId, index.lastAppliedRevision);
     const localPluginIds = await this.getLocalCommunityPluginIds();
-    for (const change of response.changes) {
-      await this.applyServerChange(change, localPluginIds);
-      index.lastAppliedRevision = Math.max(index.lastAppliedRevision, change.vaultRevision);
+    const finalChangesByPath = new Map<string, ServerChange>();
+    let latestRevision = index.lastAppliedRevision;
+    for (const change of [...response.changes].sort((left, right) => left.vaultRevision - right.vaultRevision)) {
+      finalChangesByPath.set(change.path, change);
+      latestRevision = Math.max(latestRevision, change.vaultRevision);
     }
+
+    let queuedUpload = false;
+    for (const change of finalChangesByPath.values()) {
+      const result = await this.applyServerChange(change, localPluginIds);
+      queuedUpload = queuedUpload || result === "queued_upload";
+    }
+    index.lastAppliedRevision = latestRevision;
     await this.indexStore.save();
+    if (queuedUpload) await this.pushQueue();
   }
 
   async resolveLocalConflict(path: string, strategy: "keep_local" | "use_server"): Promise<void> {
@@ -520,27 +543,30 @@ export class SyncEngine {
     new Notice(`Private Sync: kept local version for ${path}.`, 8000);
   }
 
-  private async applyServerChange(change: ServerChange, localPluginIds: Set<string>): Promise<void> {
+  private async applyServerChange(change: ServerChange, localPluginIds: Set<string>): Promise<ApplyServerChangeResult> {
     const index = this.indexStore.get();
     const record = index.files[change.path];
-    if (!shouldSyncPath(change.path, this.plugin.settings, this.plugin.app.vault.configDir)) return;
-    if (this.shouldKeepLocalPluginPath(change.path, undefined, localPluginIds)) return;
+    if (!shouldSyncPath(change.path, this.plugin.settings, this.plugin.app.vault.configDir)) return "applied";
+    if (this.shouldKeepLocalPluginPath(change.path, undefined, localPluginIds)) return "applied";
     if (change.deviceId && change.deviceId === this.plugin.settings.deviceId) {
       if (record) {
         record.serverRevisionId = change.fileRevisionId;
         record.wasSynced = true;
         record.status = record.localHash === change.contentHash ? "synced" : "dirty_local";
       }
-      return;
+      return "applied";
     }
-    if (record?.status === "dirty_local" || record?.status === "pending_upload" || record?.status === "conflict") {
+    if (record?.status === "conflict") {
       record.status = "conflict";
-      return;
+      return "applied";
+    }
+    if (record?.status === "dirty_local" || record?.status === "pending_upload") {
+      return this.mergeRemoteChangeWithLocal(change, record);
     }
     if (record && (await this.hasUnindexedLocalChange(change.path, record.localHash))) {
-      record.status = "conflict";
-      new Notice(`Private Sync: local edits preserved; conflict detected for ${change.path}.`, 10000);
-      return;
+      const result = await this.mergeRemoteChangeWithLocal(change, record);
+      if (result !== "queued_upload") new Notice(`Private Sync: local edits preserved; conflict detected for ${change.path}.`, 10000);
+      return result;
     }
     if (change.deleted) {
       await trashLocalPath(this.plugin, change.path);
@@ -553,7 +579,7 @@ export class SyncEngine {
         status: "synced",
         wasSynced: true
       };
-      return;
+      return "applied";
     }
     const content = await this.api.downloadRevision(this.plugin.settings.vaultId, change.fileRevisionId);
     await this.writeFile(change.path, content);
@@ -566,6 +592,80 @@ export class SyncEngine {
       status: "synced",
       wasSynced: true
     };
+    return "applied";
+  }
+
+  private async mergeRemoteChangeWithLocal(change: ServerChange, record: { path: string; serverRevisionId: number | null }): Promise<ApplyServerChangeResult> {
+    const index = this.indexStore.get();
+    if (change.deleted || !isTextLikePath(change.path) || !record.serverRevisionId) {
+      const currentRecord = index.files[change.path];
+      if (currentRecord) currentRecord.status = "conflict";
+      return "applied";
+    }
+
+    const stat = await getLocalFileStat(this.plugin, change.path);
+    if (!stat) {
+      const currentRecord = index.files[change.path];
+      if (currentRecord) currentRecord.status = "conflict";
+      return "applied";
+    }
+
+    const [baseContent, localContent, remoteContent] = await Promise.all([
+      this.api.downloadRevision(this.plugin.settings.vaultId, record.serverRevisionId).catch(() => null),
+      readLocalBinary(this.plugin, change.path),
+      this.api.downloadRevision(this.plugin.settings.vaultId, change.fileRevisionId)
+    ]);
+    if (!baseContent) {
+      const currentRecord = index.files[change.path];
+      if (currentRecord) currentRecord.status = "conflict";
+      return "applied";
+    }
+
+    const baseText = decodeUtf8(baseContent);
+    const localText = decodeUtf8(localContent);
+    const remoteText = decodeUtf8(remoteContent);
+    const merge = mergeTextThreeWay(baseText, localText, remoteText);
+    if (!merge) {
+      const currentRecord = index.files[change.path];
+      if (currentRecord) currentRecord.status = "conflict";
+      return "applied";
+    }
+
+    const mergedContent = encodeUtf8(merge.text);
+    await this.writeFile(change.path, mergedContent);
+    const mergedHash = await sha256(mergedContent);
+    index.files[change.path] = {
+      path: change.path,
+      localHash: mergedHash,
+      size: mergedContent.byteLength,
+      mtime: Date.now(),
+      serverRevisionId: change.fileRevisionId,
+      status: merge.hasConflicts ? "conflict" : "dirty_local",
+      wasSynced: true
+    };
+    await this.indexStore.removePathFromQueue(change.path);
+    await this.plugin.recordSyncEvent({
+      type: merge.hasConflicts ? "conflict" : "auto_merge",
+      path: change.path,
+      message: merge.hasConflicts ? `Merged non-conflicting changes but kept conflict markers in ${change.path}` : `Merged local and remote changes in ${change.path}`,
+      details: {
+        strategy: merge.hasConflicts ? "three_way_with_conflict_markers" : "three_way_auto_merge",
+        serverRevisionId: change.fileRevisionId,
+        baseRevisionId: record.serverRevisionId
+      }
+    });
+
+    if (merge.hasConflicts) return "applied";
+    await this.indexStore.enqueue({
+      clientChangeId: uuid(),
+      type: "update",
+      path: change.path,
+      baseRevisionId: change.fileRevisionId,
+      contentHash: mergedHash,
+      size: mergedContent.byteLength,
+      detectedAt: new Date().toISOString()
+    });
+    return "queued_upload";
   }
 
   private async getRemoteSnapshot(): Promise<RemoteSnapshot> {
@@ -927,8 +1027,177 @@ function isSyncedDeletedRecord(record: { localHash: string | null; size: number;
 }
 
 function isAutoMergeTextFile(file: TFile): boolean {
-  const extension = file.extension.toLowerCase();
+  return isTextLikePath(file.path);
+}
+
+function isTextLikePath(path: string): boolean {
+  const extension = path.split(".").pop()?.toLowerCase() ?? "";
   return extension === "md" || extension === "markdown" || extension === "txt";
+}
+
+function mergeTextThreeWay(baseText: string, localText: string, remoteText: string): ThreeWayMergeResult | null {
+  if (localText === remoteText) return { text: localText, hasConflicts: false };
+  if (baseText === localText) return { text: remoteText, hasConflicts: false };
+  if (baseText === remoteText) return { text: localText, hasConflicts: false };
+
+  const baseLines = splitLines(baseText);
+  const localLines = splitLines(localText);
+  const remoteLines = splitLines(remoteText);
+  if (baseLines.length * Math.max(localLines.length, remoteLines.length) > 1_000_000) return null;
+
+  const localChanges = computeLineChanges(baseLines, localLines);
+  const remoteChanges = computeLineChanges(baseLines, remoteLines);
+  if (!localChanges || !remoteChanges) return null;
+
+  const result: string[] = [];
+  let cursor = 0;
+  let localIndex = 0;
+  let remoteIndex = 0;
+  let hasConflicts = false;
+
+  while (cursor < baseLines.length || localIndex < localChanges.length || remoteIndex < remoteChanges.length) {
+    const local = localChanges[localIndex];
+    const remote = remoteChanges[remoteIndex];
+    const nextStart = Math.min(local?.baseStart ?? Number.POSITIVE_INFINITY, remote?.baseStart ?? Number.POSITIVE_INFINITY);
+
+    if (!local && !remote) {
+      result.push(...baseLines.slice(cursor));
+      break;
+    }
+
+    if (cursor < nextStart) {
+      result.push(...baseLines.slice(cursor, nextStart));
+      cursor = nextStart;
+      continue;
+    }
+
+    if (local && remote && changesOverlap(local, remote)) {
+      const overlappingLocal: LineChange[] = [];
+      const overlappingRemote: LineChange[] = [];
+      let unionStart = Math.min(local.baseStart, remote.baseStart);
+      let unionEnd = Math.max(local.baseEnd, remote.baseEnd);
+      while (localIndex < localChanges.length && changeTouchesRange(localChanges[localIndex], unionStart, unionEnd)) {
+        const change = localChanges[localIndex++];
+        overlappingLocal.push(change);
+        unionStart = Math.min(unionStart, change.baseStart);
+        unionEnd = Math.max(unionEnd, change.baseEnd);
+      }
+      while (remoteIndex < remoteChanges.length && changeTouchesRange(remoteChanges[remoteIndex], unionStart, unionEnd)) {
+        const change = remoteChanges[remoteIndex++];
+        overlappingRemote.push(change);
+        unionStart = Math.min(unionStart, change.baseStart);
+        unionEnd = Math.max(unionEnd, change.baseEnd);
+      }
+      const localReplacement = applyChangesToRange(baseLines, unionStart, unionEnd, overlappingLocal);
+      const remoteReplacement = applyChangesToRange(baseLines, unionStart, unionEnd, overlappingRemote);
+      if (sameLines(localReplacement, remoteReplacement)) {
+        result.push(...localReplacement);
+      } else {
+        hasConflicts = true;
+        result.push("<<<<<<< local", ...localReplacement, "=======", ...remoteReplacement, ">>>>>>> remote");
+      }
+      cursor = unionEnd;
+      continue;
+    }
+
+    if (local && (!remote || local.baseStart <= remote.baseStart)) {
+      result.push(...local.replacement);
+      cursor = local.baseEnd;
+      localIndex += 1;
+      continue;
+    }
+
+    if (remote) {
+      result.push(...remote.replacement);
+      cursor = remote.baseEnd;
+      remoteIndex += 1;
+      continue;
+    }
+  }
+
+  return { text: result.join("\n"), hasConflicts };
+}
+
+function computeLineChanges(baseLines: string[], targetLines: string[]): LineChange[] | null {
+  const rows = baseLines.length + 1;
+  const columns = targetLines.length + 1;
+  if (rows * columns > 1_000_000) return null;
+  const table = Array.from({ length: rows }, () => new Uint32Array(columns));
+  for (let baseIndex = baseLines.length - 1; baseIndex >= 0; baseIndex -= 1) {
+    for (let targetIndex = targetLines.length - 1; targetIndex >= 0; targetIndex -= 1) {
+      table[baseIndex][targetIndex] =
+        baseLines[baseIndex] === targetLines[targetIndex]
+          ? table[baseIndex + 1][targetIndex + 1] + 1
+          : Math.max(table[baseIndex + 1][targetIndex], table[baseIndex][targetIndex + 1]);
+    }
+  }
+
+  const matches: Array<{ baseIndex: number; targetIndex: number }> = [];
+  let baseIndex = 0;
+  let targetIndex = 0;
+  while (baseIndex < baseLines.length && targetIndex < targetLines.length) {
+    if (baseLines[baseIndex] === targetLines[targetIndex]) {
+      matches.push({ baseIndex, targetIndex });
+      baseIndex += 1;
+      targetIndex += 1;
+    } else if (table[baseIndex + 1][targetIndex] >= table[baseIndex][targetIndex + 1]) {
+      baseIndex += 1;
+    } else {
+      targetIndex += 1;
+    }
+  }
+
+  const changes: LineChange[] = [];
+  let previousBase = 0;
+  let previousTarget = 0;
+  for (const match of matches) {
+    if (previousBase < match.baseIndex || previousTarget < match.targetIndex) {
+      changes.push({
+        baseStart: previousBase,
+        baseEnd: match.baseIndex,
+        replacement: targetLines.slice(previousTarget, match.targetIndex)
+      });
+    }
+    previousBase = match.baseIndex + 1;
+    previousTarget = match.targetIndex + 1;
+  }
+  if (previousBase < baseLines.length || previousTarget < targetLines.length) {
+    changes.push({
+      baseStart: previousBase,
+      baseEnd: baseLines.length,
+      replacement: targetLines.slice(previousTarget)
+    });
+  }
+  return changes;
+}
+
+function changesOverlap(left: LineChange, right: LineChange): boolean {
+  if (left.baseStart === left.baseEnd) return left.baseStart >= right.baseStart && left.baseStart <= right.baseEnd;
+  if (right.baseStart === right.baseEnd) return right.baseStart >= left.baseStart && right.baseStart <= left.baseEnd;
+  return left.baseStart < right.baseEnd && right.baseStart < left.baseEnd;
+}
+
+function changeTouchesRange(change: LineChange, start: number, end: number): boolean {
+  if (change.baseStart === change.baseEnd) return change.baseStart >= start && change.baseStart <= end;
+  if (start === end) return start >= change.baseStart && start <= change.baseEnd;
+  return change.baseStart < end && start < change.baseEnd;
+}
+
+function applyChangesToRange(baseLines: string[], start: number, end: number, changes: LineChange[]): string[] {
+  const result: string[] = [];
+  let cursor = start;
+  for (const change of changes.sort((left, right) => left.baseStart - right.baseStart)) {
+    if (cursor < change.baseStart) result.push(...baseLines.slice(cursor, change.baseStart));
+    result.push(...change.replacement);
+    cursor = Math.max(cursor, change.baseEnd);
+  }
+  if (cursor < end) result.push(...baseLines.slice(cursor, end));
+  return result;
+}
+
+function sameLines(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((line, index) => line === right[index]);
 }
 
 function mergeServerWithUniqueLocal(serverText: string, localText: string, baseText: string | null): { text: string; appendedLineCount: number } | null {
