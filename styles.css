@@ -211,6 +211,94 @@
   background: var(--background-secondary);
 }
 
+.private-sync-conflict-diff-summary {
+  margin-bottom: 8px;
+}
+
+.private-sync-conflict-diff {
+  display: grid;
+  gap: 12px;
+  max-height: 65vh;
+  overflow: auto;
+}
+
+.private-sync-conflict-hunk {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--background-primary);
+}
+
+.private-sync-conflict-hunk-title {
+  padding: 6px 8px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+
+.private-sync-conflict-sides {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-width: 0;
+}
+
+.private-sync-conflict-side {
+  min-width: 0;
+  border-inline-end: 1px solid var(--background-modifier-border);
+}
+
+.private-sync-conflict-side:last-child {
+  border-inline-end: 0;
+}
+
+.private-sync-conflict-side-local {
+  background: rgba(214, 76, 76, 0.12);
+}
+
+.private-sync-conflict-side-server {
+  background: rgba(60, 132, 112, 0.14);
+}
+
+.private-sync-conflict-side-title {
+  padding: 6px 8px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.private-sync-conflict-side-local .private-sync-conflict-side-title {
+  color: var(--text-error, var(--color-red));
+}
+
+.private-sync-conflict-side-server .private-sync-conflict-side-title {
+  color: var(--text-success, var(--color-green));
+}
+
+.private-sync-conflict-code {
+  margin: 0;
+  padding: 0;
+  white-space: pre;
+  overflow: auto;
+  background: transparent;
+}
+
+.private-sync-conflict-line {
+  display: grid;
+  grid-template-columns: 4ch minmax(0, 1fr);
+  gap: 8px;
+  min-width: max-content;
+  padding: 1px 8px;
+}
+
+.private-sync-conflict-line-number {
+  color: var(--text-faint);
+  text-align: right;
+  user-select: none;
+}
+
+.private-sync-conflict-line-text {
+  min-width: 0;
+}
+
 @container (max-width: 360px) {
   .private-sync-row,
   .private-sync-request-row,
@@ -233,5 +321,33 @@
 
   .private-sync-ignored-item {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .private-sync-conflict-sides {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .private-sync-conflict-side {
+    border-inline-end: 0;
+    border-bottom: 1px solid var(--background-modifier-border);
+  }
+
+  .private-sync-conflict-side:last-child {
+    border-bottom: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .private-sync-conflict-sides {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .private-sync-conflict-side {
+    border-inline-end: 0;
+    border-bottom: 1px solid var(--background-modifier-border);
+  }
+
+  .private-sync-conflict-side:last-child {
+    border-bottom: 0;
   }
 }

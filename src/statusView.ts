@@ -1,7 +1,7 @@
 import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
 import { readLocalBinary } from "./localFiles";
 import { parseDevicePairingPayload } from "./pairingApprovalModal";
-import { buildLineDiff, decodeText, TextPreviewModal } from "./textPreviewModal";
+import { ConflictDiffModal, decodeText, TextPreviewModal } from "./textPreviewModal";
 import type PrivateSyncPlugin from "./plugin";
 import type {
   DevicePairingRequestPayload,
@@ -482,7 +482,7 @@ export class PrivateSyncView extends ItemView {
     try {
       const local = decodeText(await readLocalBinary(this.plugin, path).catch(() => new ArrayBuffer(0)));
       const server = decodeText(await this.plugin.api.download(this.plugin.settings.vaultId, path));
-      new TextPreviewModal(this.plugin, `Diff: ${path}`, buildLineDiff("Local", local, "Server", server)).open();
+      new ConflictDiffModal(this.plugin, `Diff: ${path}`, local, server).open();
     } catch (error) {
       new Notice(`Private Sync diff failed: ${errorMessage(error)}`, 10000);
     }
