@@ -152,6 +152,10 @@ export class ApiClient {
     return this.get("/api/v1/devices");
   }
 
+  async updateCurrentDevice(input: { name: string }): Promise<{ ok: true; device: RemoteDevice }> {
+    return this.post("/api/v1/devices/me", input);
+  }
+
   async revokeDevice(deviceId: string): Promise<{ ok: true }> {
     return this.post("/api/v1/devices/revoke", { deviceId });
   }

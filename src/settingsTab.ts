@@ -6,6 +6,7 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
   private pairingPassword = "";
   private recoveryPairingCode = "";
   private newVaultName = "";
+  private deviceNameSyncTimer: number | null = null;
 
   constructor(app: App, private readonly plugin: PrivateSyncPlugin) {
     super(app, plugin);
@@ -34,6 +35,7 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
         text.setValue(this.plugin.settings.deviceName).onChange(async (value) => {
           this.plugin.settings.deviceName = value;
           await this.plugin.saveSettings();
+          this.scheduleDeviceNameSync(value.trim());
         })
       );
 
@@ -199,6 +201,28 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
     }
     await this.plugin.api.serverInfo();
     await this.plugin.api.login(this.pairingPassword);
+  }
+
+  private scheduleDeviceNameSync(name: string): void {
+    if (this.deviceNameSyncTimer !== null) {
+      window.clearTimeout(this.deviceNameSyncTimer);
+      this.deviceNameSyncTimer = null;
+    }
+    if (!this.plugin.settings.deviceToken) return;
+    this.deviceNameSyncTimer = window.setTimeout(() => {
+      this.deviceNameSyncTimer = null;
+      this.syncDeviceName(name).catch((error) => {
+        new Notice(`Private Sync: device name was saved locally but not on server: ${errorMessage(error)}`, 10000);
+      });
+    }, 800);
+  }
+
+  private async syncDeviceName(name: string): Promise<void> {
+    if (!this.plugin.settings.deviceToken) return;
+    if (name !== this.plugin.settings.deviceName.trim()) return;
+    if (!name) throw new Error("Device name cannot be empty.");
+    await this.plugin.api.updateCurrentDevice({ name });
+    this.plugin.refreshView();
   }
 
   private renderVaultSettings(containerEl: HTMLElement): void {

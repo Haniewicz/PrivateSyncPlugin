@@ -253,6 +253,7 @@ export default class PrivateSyncPlugin extends Plugin {
         message.type === "request_resolved" ||
         message.type === "device_revoked" ||
         message.type === "device_restored" ||
+        message.type === "device_updated" ||
         message.type === "device_deleted"
       ) {
         this.refreshView();
