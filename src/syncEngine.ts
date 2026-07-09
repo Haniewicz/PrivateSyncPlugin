@@ -545,6 +545,49 @@ export class SyncEngine {
     new Notice(`Private Sync: kept local version for ${path}.`, 8000);
   }
 
+  async resolveLocalConflictWithText(path: string, mergedText: string, conflictId?: string): Promise<void> {
+    if (this.plugin.handleOfflineSyncAttempt()) return;
+    const index = this.indexStore.get();
+    const previousRecord = index.files[path];
+    const history = await this.api.history(this.plugin.settings.vaultId, path);
+    const current = history.history[0];
+    const mergedContent = encodeUtf8(mergedText);
+    await this.writeFile(path, mergedContent);
+    const stat = await getLocalFileStat(this.plugin, path);
+    const mergedHash = await sha256(mergedContent);
+    index.files[path] = {
+      path,
+      localHash: mergedHash,
+      size: stat?.size ?? mergedContent.byteLength,
+      mtime: stat?.mtime ?? Date.now(),
+      serverRevisionId: current?.id ?? previousRecord?.serverRevisionId ?? null,
+      status: "dirty_local",
+      wasSynced: previousRecord?.wasSynced ?? Boolean(current)
+    };
+    await this.indexStore.removePathFromQueue(path);
+    await this.indexStore.enqueue({
+      clientChangeId: uuid(),
+      type: current || previousRecord?.wasSynced ? "update" : "create",
+      path,
+      baseRevisionId: current?.id ?? previousRecord?.serverRevisionId ?? null,
+      contentHash: mergedHash,
+      size: stat?.size ?? mergedContent.byteLength,
+      detectedAt: new Date().toISOString()
+    });
+    await this.pushQueue();
+    await this.pullChanges();
+    await this.resolveRemoteConflicts(path, "resolved", { strategy: "custom_fragment_merge", conflictId }, conflictId);
+    await this.keepLocalConflictStatusIfPending(path);
+    await this.plugin.recordSyncEvent({
+      type: "manual_resolution",
+      path,
+      message: `Applied selected conflict fragments for ${path}`,
+      details: { strategy: "custom_fragment_merge", conflictId }
+    });
+    this.plugin.refreshView();
+    new Notice(`Private Sync: applied selected fragments for ${path}.`, 8000);
+  }
+
   private async applyServerChange(change: ServerChange, localPluginIds: Set<string>): Promise<ApplyServerChangeResult> {
     const index = this.indexStore.get();
     const record = index.files[change.path];

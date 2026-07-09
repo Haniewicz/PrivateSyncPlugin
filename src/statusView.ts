@@ -417,7 +417,7 @@ export class PrivateSyncView extends ItemView {
     details.createDiv({ text: conflict.path });
     details.createDiv({ text: conflictSummary(conflict), cls: "private-sync-muted" });
     const actions = row.createDiv({ cls: "private-sync-actions" });
-    this.actionButton(actions, "Diff", "subtle").onclick = () => this.showConflictDiff(conflict.path);
+    this.actionButton(actions, "Diff / fragments", "subtle").onclick = () => this.showConflictDiff(conflict);
     const keepLocal = this.actionButton(actions, "Keep local", "success");
     keepLocal.disabled = !conflict.local;
     keepLocal.onclick = () => this.resolveConflict(conflict, "keep_local");
@@ -499,11 +499,16 @@ export class PrivateSyncView extends ItemView {
     }
   }
 
-  private async showConflictDiff(path: string): Promise<void> {
+  private async showConflictDiff(conflict: ConflictListItem): Promise<void> {
     try {
+      const path = conflict.path;
       const local = decodeText(await readLocalBinary(this.plugin, path).catch(() => new ArrayBuffer(0)));
       const server = decodeText(await this.plugin.api.download(this.plugin.settings.vaultId, path));
-      new ConflictDiffModal(this.plugin, `Diff: ${path}`, local, server).open();
+      new ConflictDiffModal(this.plugin, `Diff: ${path}`, local, server, async (mergedText) => {
+        await this.plugin.syncEngine.resolveLocalConflictWithText(path, mergedText, conflict.remote?.id);
+        this.selectedConflictKeys.delete(conflict.key);
+        this.render();
+      }).open();
     } catch (error) {
       new Notice(`Private Sync diff failed: ${errorMessage(error)}`, 10000);
     }

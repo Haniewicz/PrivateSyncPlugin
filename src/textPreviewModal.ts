@@ -33,12 +33,25 @@ type ConflictDiffHunk = {
   server: ConflictDiffSide;
 };
 
+type ConflictDiffSegment =
+  | { type: "common"; lines: string[] }
+  | { type: "conflict"; hunk: ConflictDiffHunk };
+
+type ConflictSideChoice = "local" | "server";
+
 export class ConflictDiffModal extends Modal {
+  private choices = new Map<number, ConflictSideChoice>();
+  private applyButton: HTMLButtonElement | null = null;
+  private summary: HTMLElement | null = null;
+  private hunks: ConflictDiffHunk[] = [];
+  private segments: ConflictDiffSegment[] = [];
+
   constructor(
     plugin: PrivateSyncPlugin,
     private readonly title: string,
     private readonly localText: string,
-    private readonly serverText: string
+    private readonly serverText: string,
+    private readonly onApply?: (mergedText: string) => Promise<void>
   ) {
     super(plugin.app);
   }
@@ -48,20 +61,33 @@ export class ConflictDiffModal extends Modal {
     this.contentEl.addClass("private-sync-preview-modal");
     this.contentEl.createEl("h2", { text: this.title });
 
-    const hunks = buildConflictDiffHunks(this.localText, this.serverText);
-    if (hunks.length === 0) {
+    const diff = buildConflictDiff(this.localText, this.serverText);
+    this.hunks = diff.hunks;
+    this.segments = diff.segments;
+    this.choices.clear();
+    if (this.hunks.length === 0) {
       this.contentEl.createDiv({ text: "No conflicting fragments.", cls: "private-sync-muted" });
       return;
     }
 
-    const summary = this.contentEl.createDiv({
-      text: `${hunks.length} conflicting fragment${hunks.length === 1 ? "" : "s"}`,
+    this.summary = this.contentEl.createDiv({
+      text: this.summaryText(),
       cls: "private-sync-muted private-sync-conflict-diff-summary"
     });
-    summary.setAttr("aria-live", "polite");
+    this.summary.setAttr("aria-live", "polite");
 
     const list = this.contentEl.createDiv({ cls: "private-sync-conflict-diff" });
-    for (const hunk of hunks) this.renderHunk(list, hunk);
+    for (const hunk of this.hunks) this.renderHunk(list, hunk);
+
+    if (this.onApply) {
+      const actions = this.contentEl.createDiv({ cls: "private-sync-conflict-merge-actions" });
+      this.applyButton = actions.createEl("button", {
+        text: "Apply selected fragments",
+        cls: "private-sync-button private-sync-button-success"
+      });
+      this.applyButton.disabled = true;
+      this.applyButton.onclick = () => this.applySelectedFragments();
+    }
   }
 
   onClose(): void {
@@ -70,11 +96,58 @@ export class ConflictDiffModal extends Modal {
 
   private renderHunk(parent: Element, hunk: ConflictDiffHunk): void {
     const section = parent.createDiv({ cls: "private-sync-conflict-hunk" });
-    section.createDiv({ text: `Fragment ${hunk.index}`, cls: "private-sync-conflict-hunk-title" });
+    const header = section.createDiv({ cls: "private-sync-conflict-hunk-header" });
+    header.createDiv({ text: `Fragment ${hunk.index}`, cls: "private-sync-conflict-hunk-title" });
 
     const sides = section.createDiv({ cls: "private-sync-conflict-sides" });
     this.renderSide(sides, "Local", hunk.local, "local");
     this.renderSide(sides, "Server", hunk.server, "server");
+
+    if (this.onApply) {
+      const controls = section.createDiv({ cls: "private-sync-conflict-choice-actions" });
+      controls.createSpan({ text: "Use for this fragment", cls: "private-sync-conflict-choice-label" });
+      const local = controls.createEl("button", {
+        text: "Local",
+        cls: "private-sync-button private-sync-button-subtle private-sync-conflict-choice"
+      });
+      const server = controls.createEl("button", {
+        text: "Server",
+        cls: "private-sync-button private-sync-button-subtle private-sync-conflict-choice"
+      });
+      local.onclick = () => this.chooseHunk(hunk.index, "local", local, server);
+      server.onclick = () => this.chooseHunk(hunk.index, "server", local, server);
+    }
+  }
+
+  private chooseHunk(index: number, choice: ConflictSideChoice, localButton: HTMLButtonElement, serverButton: HTMLButtonElement): void {
+    this.choices.set(index, choice);
+    localButton.toggleClass("is-selected", choice === "local");
+    serverButton.toggleClass("is-selected", choice === "server");
+    this.updateApplyState();
+  }
+
+  private updateApplyState(): void {
+    if (this.summary) this.summary.setText(this.summaryText());
+    if (this.applyButton) this.applyButton.disabled = this.choices.size !== this.hunks.length;
+  }
+
+  private summaryText(): string {
+    const count = this.hunks.length;
+    const selected = this.choices.size;
+    const fragments = `${count} conflicting fragment${count === 1 ? "" : "s"}`;
+    if (!this.onApply) return fragments;
+    return `${fragments} · ${selected}/${count} selected`;
+  }
+
+  private async applySelectedFragments(): Promise<void> {
+    if (!this.onApply || this.choices.size !== this.hunks.length) return;
+    if (this.applyButton) this.applyButton.disabled = true;
+    try {
+      await this.onApply(mergeSelectedConflictText(this.segments, this.choices));
+      this.close();
+    } finally {
+      if (this.applyButton) this.applyButton.disabled = this.choices.size !== this.hunks.length;
+    }
   }
 
   private renderSide(parent: Element, label: string, side: ConflictDiffSide, tone: "local" | "server"): void {
@@ -93,17 +166,18 @@ export class ConflictDiffModal extends Modal {
   }
 }
 
-function buildConflictDiffHunks(localText: string, serverText: string): ConflictDiffHunk[] {
+function buildConflictDiff(localText: string, serverText: string): { hunks: ConflictDiffHunk[]; segments: ConflictDiffSegment[] } {
   const localLines = splitTextLines(localText);
   const serverLines = splitTextLines(serverText);
   const matches = longestCommonLineMatches(localLines, serverLines);
   const hunks: ConflictDiffHunk[] = [];
+  const segments: ConflictDiffSegment[] = [];
   let previousLocal = 0;
   let previousServer = 0;
 
   for (const match of [...matches, { localIndex: localLines.length, serverIndex: serverLines.length }]) {
     if (previousLocal < match.localIndex || previousServer < match.serverIndex) {
-      hunks.push({
+      const hunk = {
         index: hunks.length + 1,
         local: {
           startLine: previousLocal + 1,
@@ -113,13 +187,31 @@ function buildConflictDiffHunks(localText: string, serverText: string): Conflict
           startLine: previousServer + 1,
           lines: serverLines.slice(previousServer, match.serverIndex)
         }
-      });
+      };
+      hunks.push(hunk);
+      segments.push({ type: "conflict", hunk });
+    }
+    if (match.localIndex < localLines.length && match.serverIndex < serverLines.length) {
+      segments.push({ type: "common", lines: [localLines[match.localIndex]] });
     }
     previousLocal = match.localIndex + 1;
     previousServer = match.serverIndex + 1;
   }
 
-  return hunks;
+  return { hunks, segments };
+}
+
+function mergeSelectedConflictText(segments: ConflictDiffSegment[], choices: Map<number, ConflictSideChoice>): string {
+  const lines: string[] = [];
+  for (const segment of segments) {
+    if (segment.type === "common") {
+      lines.push(...segment.lines);
+      continue;
+    }
+    const choice = choices.get(segment.hunk.index);
+    lines.push(...(choice === "server" ? segment.hunk.server.lines : segment.hunk.local.lines));
+  }
+  return lines.join("\n");
 }
 
 function longestCommonLineMatches(localLines: string[], serverLines: string[]): Array<{ localIndex: number; serverIndex: number }> {
