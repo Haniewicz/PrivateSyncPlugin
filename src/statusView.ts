@@ -1,4 +1,5 @@
-import { ItemView, Notice, TFile, WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
+import { readLocalBinary } from "./localFiles";
 import { parseDevicePairingPayload } from "./pairingApprovalModal";
 import { buildLineDiff, decodeText, TextPreviewModal } from "./textPreviewModal";
 import type PrivateSyncPlugin from "./plugin";
@@ -18,6 +19,7 @@ type Tab = "status" | "devices" | "requests" | "conflicts" | "history" | "events
 export class PrivateSyncView extends ItemView {
   private activeTab: Tab = "status";
   private historyPath = "";
+  private selectedConflictPaths = new Set<string>();
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: PrivateSyncPlugin) {
     super(leaf);
@@ -45,8 +47,8 @@ export class PrivateSyncView extends ItemView {
     root.addClass("private-sync-view");
 
     const toolbar = root.createDiv({ cls: "private-sync-toolbar" });
-    toolbar.createEl("button", { text: "Sync now" }).onclick = () => this.plugin.syncEngine.syncNow();
-    toolbar.createEl("button", { text: "Pair" }).onclick = () => this.plugin.syncEngine.pairDevice();
+    this.actionButton(toolbar, "Sync now", "primary").onclick = () => this.plugin.syncEngine.syncNow();
+    this.actionButton(toolbar, "Pair", "primary").onclick = () => this.plugin.syncEngine.pairDevice();
 
     const tabs = root.createDiv({ cls: "private-sync-tabs" });
     for (const tab of ["status", "devices", "requests", "conflicts", "history", "events"] as Tab[]) {
@@ -102,6 +104,11 @@ export class PrivateSyncView extends ItemView {
     const localConflicts = Object.values(this.plugin.indexStore.get().files).filter(
       (file) => file.status === "conflict" || file.status === "locked_by_request"
     );
+    const visiblePaths = new Set(localConflicts.map((conflict) => conflict.path));
+    for (const path of [...this.selectedConflictPaths]) {
+      if (!visiblePaths.has(path)) this.selectedConflictPaths.delete(path);
+    }
+    this.conflictBulkToolbar(root, localConflicts);
     for (const conflict of localConflicts) this.localConflictRow(list, conflict);
     this.plugin.api
       .conflicts(this.plugin.settings.vaultId)
@@ -164,7 +171,7 @@ export class PrivateSyncView extends ItemView {
       this.render();
     };
     const activeFile = this.plugin.app.workspace.getActiveFile();
-    controls.createEl("button", { text: "Active file" }).onclick = () => {
+    this.actionButton(controls, "Active file", "subtle").onclick = () => {
       if (!activeFile) {
         new Notice("Private Sync: no active file.", 5000);
         return;
@@ -172,7 +179,7 @@ export class PrivateSyncView extends ItemView {
       this.historyPath = activeFile.path;
       this.render();
     };
-    controls.createEl("button", { text: "Load" }).onclick = () => {
+    this.actionButton(controls, "Load", "primary").onclick = () => {
       this.historyPath = input.value.trim();
       this.render();
     };
@@ -217,12 +224,35 @@ export class PrivateSyncView extends ItemView {
     row.createDiv({ text: value, cls: "private-sync-muted" });
   }
 
+  private conflictBulkToolbar(root: Element, conflicts: LocalFileRecord[]): void {
+    const toolbar = root.createDiv({ cls: "private-sync-toolbar private-sync-bulk-toolbar" });
+    toolbar.createDiv({ text: `${this.selectedConflictPaths.size}/${conflicts.length} selected`, cls: "private-sync-muted private-sync-bulk-count" });
+    const selectAll = this.actionButton(toolbar, "Select all", "subtle");
+    selectAll.disabled = conflicts.length === 0;
+    selectAll.onclick = () => {
+      this.selectedConflictPaths = new Set(conflicts.map((conflict) => conflict.path));
+      this.render();
+    };
+    const clear = this.actionButton(toolbar, "Clear", "subtle");
+    clear.disabled = this.selectedConflictPaths.size === 0;
+    clear.onclick = () => {
+      this.selectedConflictPaths.clear();
+      this.render();
+    };
+    const keepLocal = this.actionButton(toolbar, "Keep local", "success");
+    keepLocal.disabled = this.selectedConflictPaths.size === 0;
+    keepLocal.onclick = () => this.resolveSelectedConflicts("keep_local");
+    const useServer = this.actionButton(toolbar, "Use server", "info");
+    useServer.disabled = this.selectedConflictPaths.size === 0;
+    useServer.onclick = () => this.resolveSelectedConflicts("use_server");
+  }
+
   private requestRow(parent: Element, request: ServerRequest, payload: DevicePairingRequestPayload): void {
     const row = parent.createDiv({ cls: "private-sync-row private-sync-request-row" });
     const details = row.createDiv();
     details.createDiv({ text: payload.deviceName });
     details.createDiv({ text: `${payload.deviceType}${payload.ip ? ` · ${payload.ip}` : ""}`, cls: "private-sync-muted" });
-    const approve = row.createEl("button", { text: "Approve" });
+    const approve = this.actionButton(row, "Approve", "success");
     approve.onclick = async () => {
       approve.disabled = true;
       approve.textContent = "Approving...";
@@ -250,7 +280,7 @@ export class PrivateSyncView extends ItemView {
       text: `${device.type} · ${device.revoked_at ? "revoked" : "trusted"} · last seen ${device.last_seen_at ?? "never"}`,
       cls: "private-sync-muted"
     });
-    const toggle = row.createEl("button", { text: device.revoked_at ? "Restore" : "Revoke" });
+    const toggle = this.actionButton(row, device.revoked_at ? "Restore" : "Revoke", device.revoked_at ? "success" : "danger");
     toggle.disabled = device.id === this.plugin.settings.deviceId;
     toggle.onclick = async () => {
       toggle.disabled = true;
@@ -270,7 +300,7 @@ export class PrivateSyncView extends ItemView {
         toggle.textContent = device.revoked_at ? "Restore" : "Revoke";
       }
     };
-    const remove = row.createEl("button", { text: "Delete" });
+    const remove = this.actionButton(row, "Delete", "danger");
     remove.disabled = device.id === this.plugin.settings.deviceId;
     remove.onclick = async () => {
       remove.disabled = true;
@@ -289,13 +319,23 @@ export class PrivateSyncView extends ItemView {
 
   private localConflictRow(parent: Element, conflict: LocalFileRecord): void {
     const row = parent.createDiv({ cls: "private-sync-row private-sync-conflict-row" });
+    const checkbox = row.createEl("input", { type: "checkbox", cls: "private-sync-conflict-checkbox" });
+    checkbox.checked = this.selectedConflictPaths.has(conflict.path);
+    checkbox.onchange = () => {
+      if (checkbox.checked) {
+        this.selectedConflictPaths.add(conflict.path);
+      } else {
+        this.selectedConflictPaths.delete(conflict.path);
+      }
+      this.render();
+    };
     const details = row.createDiv();
     details.createDiv({ text: conflict.path });
     details.createDiv({ text: conflict.status, cls: "private-sync-muted" });
     const actions = row.createDiv({ cls: "private-sync-actions" });
-    actions.createEl("button", { text: "Diff" }).onclick = () => this.showConflictDiff(conflict.path);
-    actions.createEl("button", { text: "Keep local" }).onclick = () => this.resolveConflict(conflict.path, "keep_local");
-    actions.createEl("button", { text: "Use server" }).onclick = () => this.resolveConflict(conflict.path, "use_server");
+    this.actionButton(actions, "Diff", "subtle").onclick = () => this.showConflictDiff(conflict.path);
+    this.actionButton(actions, "Keep local", "success").onclick = () => this.resolveConflict(conflict.path, "keep_local");
+    this.actionButton(actions, "Use server", "info").onclick = () => this.resolveConflict(conflict.path, "use_server");
   }
 
   private remoteConflictRow(parent: Element, conflict: ServerConflict): void {
@@ -310,10 +350,33 @@ export class PrivateSyncView extends ItemView {
   private async resolveConflict(path: string, strategy: "keep_local" | "use_server"): Promise<void> {
     try {
       await this.plugin.syncEngine.resolveLocalConflict(path, strategy);
+      this.selectedConflictPaths.delete(path);
       this.render();
     } catch (error) {
       new Notice(`Private Sync conflict resolution failed: ${errorMessage(error)}`, 10000);
     }
+  }
+
+  private async resolveSelectedConflicts(strategy: "keep_local" | "use_server"): Promise<void> {
+    const paths = [...this.selectedConflictPaths];
+    if (paths.length === 0) return;
+    let succeeded = 0;
+    const failed: string[] = [];
+    for (const path of paths) {
+      try {
+        await this.plugin.syncEngine.resolveLocalConflict(path, strategy);
+        this.selectedConflictPaths.delete(path);
+        succeeded += 1;
+      } catch (error) {
+        failed.push(`${path}: ${errorMessage(error)}`);
+      }
+    }
+    if (failed.length > 0) {
+      new Notice(`Private Sync: resolved ${succeeded}/${paths.length} conflicts. Failed: ${failed.slice(0, 3).join("; ")}`, 15000);
+    } else {
+      new Notice(`Private Sync: resolved ${succeeded} conflicts.`, 8000);
+    }
+    this.render();
   }
 
   private historyRow(parent: Element, entry: FileHistoryEntry): void {
@@ -325,10 +388,10 @@ export class PrivateSyncView extends ItemView {
       cls: "private-sync-muted"
     });
     const actions = row.createDiv({ cls: "private-sync-actions" });
-    const preview = actions.createEl("button", { text: "Preview" });
+    const preview = this.actionButton(actions, "Preview", "subtle");
     preview.disabled = Boolean(entry.deleted);
     preview.onclick = () => this.previewRevision(entry);
-    actions.createEl("button", { text: "Restore" }).onclick = () => this.restoreRevision(entry);
+    this.actionButton(actions, "Restore", "success").onclick = () => this.restoreRevision(entry);
   }
 
   private decisionRequestRow(parent: Element, request: ServerRequest): void {
@@ -337,11 +400,11 @@ export class PrivateSyncView extends ItemView {
     details.createDiv({ text: requestLabel(request.type) });
     details.createDiv({ text: requestPayloadSummary(request), cls: "private-sync-muted" });
     const actions = row.createDiv({ cls: "private-sync-actions" });
-    actions.createEl("button", { text: "Details" }).onclick = () => {
+    this.actionButton(actions, "Details", "subtle").onclick = () => {
       new TextPreviewModal(this.plugin, requestLabel(request.type), requestPayloadPretty(request)).open();
     };
-    actions.createEl("button", { text: "Approve" }).onclick = () => this.resolveRequest(request, "approved");
-    actions.createEl("button", { text: "Reject" }).onclick = () => this.resolveRequest(request, "rejected");
+    this.actionButton(actions, "Approve", "success").onclick = () => this.resolveRequest(request, "approved");
+    this.actionButton(actions, "Reject", "danger").onclick = () => this.resolveRequest(request, "rejected");
   }
 
   private async resolveRequest(request: ServerRequest, status: "approved" | "rejected"): Promise<void> {
@@ -357,8 +420,7 @@ export class PrivateSyncView extends ItemView {
 
   private async showConflictDiff(path: string): Promise<void> {
     try {
-      const localFile = this.plugin.app.vault.getAbstractFileByPath(path);
-      const local = localFile instanceof TFile ? decodeText(await this.plugin.app.vault.readBinary(localFile)) : "";
+      const local = decodeText(await readLocalBinary(this.plugin, path).catch(() => new ArrayBuffer(0)));
       const server = decodeText(await this.plugin.api.download(this.plugin.settings.vaultId, path));
       new TextPreviewModal(this.plugin, `Diff: ${path}`, buildLineDiff("Local", local, "Server", server)).open();
     } catch (error) {
@@ -384,6 +446,10 @@ export class PrivateSyncView extends ItemView {
     } catch (error) {
       new Notice(`Private Sync restore failed: ${errorMessage(error)}`, 10000);
     }
+  }
+
+  private actionButton(parent: Element, text: string, tone: "primary" | "success" | "info" | "danger" | "subtle"): HTMLButtonElement {
+    return parent.createEl("button", { text, cls: `private-sync-button private-sync-button-${tone}` });
   }
 }
 

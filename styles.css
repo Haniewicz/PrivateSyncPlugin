@@ -9,6 +9,7 @@
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  align-items: center;
 }
 
 .private-sync-tabs {
@@ -59,11 +60,61 @@
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.private-sync-conflict-row {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.private-sync-conflict-checkbox {
+  margin: 0;
+}
+
 .private-sync-actions {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.private-sync-bulk-toolbar {
+  padding: 6px 0;
+}
+
+.private-sync-bulk-count {
+  min-width: 88px;
+}
+
+.private-sync-button {
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+}
+
+.private-sync-button-subtle {
+  color: var(--text-muted);
+}
+
+.private-sync-button-primary,
+.private-sync-button-info {
+  border-color: var(--interactive-accent);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.private-sync-button-success {
+  border-color: var(--text-success, var(--color-green));
+  background: var(--background-modifier-success, var(--background-secondary));
+  color: var(--text-success, var(--color-green));
+}
+
+.private-sync-button-danger {
+  border-color: var(--text-error, var(--color-red));
+  background: var(--background-modifier-error, var(--background-secondary));
+  color: var(--text-error, var(--color-red));
+}
+
+.private-sync-button:disabled {
+  opacity: 0.55;
 }
 
 .private-sync-event-row {

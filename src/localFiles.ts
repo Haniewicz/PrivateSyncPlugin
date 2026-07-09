@@ -1,4 +1,4 @@
-import { normalizePath, TFile } from "obsidian";
+import { normalizePath, TFile, TFolder } from "obsidian";
 import { shouldAutoSyncPath } from "./filePolicy";
 import type PrivateSyncPlugin from "./plugin";
 import { shouldSyncPath } from "./settingsSyncPolicy";
@@ -48,11 +48,12 @@ export async function writeLocalBinary(plugin: PrivateSyncPlugin, path: string, 
     return;
   }
   const parent = normalizedPath.split("/").slice(0, -1).join("/");
-  if (parent) await ensureFolder(plugin, parent);
-  if (normalizedPath.startsWith(`${normalizePath(plugin.app.vault.configDir)}/`)) {
+  if (isConfigPath(plugin, normalizedPath)) {
+    if (parent) await ensureAdapterFolder(plugin, parent);
     await plugin.app.vault.adapter.writeBinary(normalizedPath, content);
     return;
   }
+  if (parent) await ensureVaultFolder(plugin, parent);
   await plugin.app.vault.createBinary(normalizedPath, content);
 }
 
@@ -119,7 +120,7 @@ async function listConfigFiles(plugin: PrivateSyncPlugin): Promise<LocalSyncFile
   return files;
 }
 
-async function ensureFolder(plugin: PrivateSyncPlugin, folder: string): Promise<void> {
+async function ensureAdapterFolder(plugin: PrivateSyncPlugin, folder: string): Promise<void> {
   const parts = normalizePath(folder).split("/");
   let current = "";
   for (const part of parts) {
@@ -128,6 +129,22 @@ async function ensureFolder(plugin: PrivateSyncPlugin, folder: string): Promise<
       await plugin.app.vault.adapter.mkdir(current);
     }
   }
+}
+
+async function ensureVaultFolder(plugin: PrivateSyncPlugin, folder: string): Promise<void> {
+  const parts = normalizePath(folder).split("/");
+  let current = "";
+  for (const part of parts) {
+    current = current ? `${current}/${part}` : part;
+    const existing = plugin.app.vault.getAbstractFileByPath(current);
+    if (existing instanceof TFolder) continue;
+    if (existing) throw new Error(`Cannot create folder ${current}: a file already exists at that path.`);
+    await plugin.app.vault.createFolder(current);
+  }
+}
+
+function isConfigPath(plugin: PrivateSyncPlugin, path: string): boolean {
+  return normalizePath(path).startsWith(`${normalizePath(plugin.app.vault.configDir)}/`);
 }
 
 function shouldExploreConfigFolder(path: string, configDir: string, syncCommunityPlugins: boolean): boolean {

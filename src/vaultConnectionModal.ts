@@ -53,14 +53,14 @@ class VaultConnectionModal extends Modal {
     for (const reason of this.input.assessment.reasons) this.row(list, "Reason", reason);
 
     const actions = new Setting(contentEl).addButton((button) =>
-      button.setButtonText("Cancel").onClick(() => {
+      button.setButtonText("Cancel").setClass("private-sync-button").setClass("private-sync-button-subtle").onClick(() => {
         this.finish("cancel");
       })
     );
 
     if (this.input.assessment.riskLevel === "empty") {
       actions.addButton((button) => {
-        button.setButtonText("Upload local files").setCta();
+        button.setButtonText("Upload local files").setClass("private-sync-button").setClass("private-sync-button-primary").setCta();
         button.onClick(() => this.finish("replace_remote"));
       });
       return;
@@ -68,11 +68,11 @@ class VaultConnectionModal extends Modal {
 
     actions
       .addButton((button) => {
-        button.setButtonText("Use server files");
+        button.setButtonText("Use server files").setClass("private-sync-button").setClass("private-sync-button-info");
         button.onClick(() => this.finish("replace_local"));
       })
       .addButton((button) => {
-        button.setButtonText("Use local files");
+        button.setButtonText("Use local files").setClass("private-sync-button").setClass("private-sync-button-success");
         button.onClick(() => this.finish("replace_remote"));
       });
   }

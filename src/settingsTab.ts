@@ -79,7 +79,7 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
       .setName("Test server password")
       .setDesc("Checks this Server URL and the current Pairing password without pairing a device.")
       .addButton((button) =>
-        button.setButtonText("Test").onClick(async () => {
+        button.setButtonText("Test").setClass("private-sync-button").setClass("private-sync-button-subtle").onClick(async () => {
           button.setDisabled(true);
           button.setButtonText("Testing...");
           try {
@@ -97,7 +97,7 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Pair this device")
       .addButton((button) =>
-        button.setButtonText("Pair").setCta().onClick(async () => {
+        button.setButtonText("Pair").setClass("private-sync-button").setClass("private-sync-button-primary").setCta().onClick(async () => {
           button.setDisabled(true);
           button.setButtonText("Pairing...");
           try {
@@ -223,13 +223,15 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
         });
       })
       .addButton((button) =>
-        button.setButtonText("Refresh").onClick(() => {
+        button.setButtonText("Refresh").setClass("private-sync-button").setClass("private-sync-button-subtle").onClick(() => {
           this.display();
         })
       )
       .addButton((button) =>
         button
           .setButtonText(this.plugin.settings.vaultLinked ? "Linked" : "Link")
+          .setClass("private-sync-button")
+          .setClass("private-sync-button-primary")
           .setCta()
           .setDisabled(!this.plugin.settings.deviceToken || this.plugin.settings.vaultLinked)
           .onClick(async () => {
@@ -259,7 +261,7 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
           })
       )
       .addButton((button) =>
-        button.setButtonText("Create").setDisabled(!this.plugin.settings.deviceToken || this.plugin.settings.vaultLinked).onClick(async () => {
+        button.setButtonText("Create").setClass("private-sync-button").setClass("private-sync-button-primary").setDisabled(!this.plugin.settings.deviceToken || this.plugin.settings.vaultLinked).onClick(async () => {
           button.setDisabled(true);
           button.setButtonText("Creating...");
           try {

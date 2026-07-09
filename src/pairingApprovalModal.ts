@@ -25,13 +25,15 @@ export class PairingApprovalModal extends Modal {
 
     new Setting(contentEl)
       .addButton((button) =>
-        button.setButtonText("Later").onClick(() => {
+        button.setButtonText("Later").setClass("private-sync-button").setClass("private-sync-button-subtle").onClick(() => {
           this.close();
         })
       )
       .addButton((button) =>
         button
           .setButtonText("Approve")
+          .setClass("private-sync-button")
+          .setClass("private-sync-button-success")
           .setCta()
           .onClick(async () => {
             button.setDisabled(true);
