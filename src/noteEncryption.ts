@@ -1,6 +1,7 @@
 import { decryptTextFragment, encryptTextFragment } from "./crypto";
 
 export const NOTE_AUTO_ENCRYPT_PROPERTY = "private-sync-encrypt";
+export const NOTE_ENCRYPTED_PLACEHOLDER_PROPERTY = "private-sync-encrypted-placeholder";
 
 type NoteParts = {
   prefix: string;
@@ -58,6 +59,29 @@ export function isEncryptedNoteBody(text: string): boolean {
 
 export function isMarkedForServerEncryption(text: string): boolean {
   return hasAutoEncryptProperty(text);
+}
+
+export function isEncryptedPlaceholder(text: string): boolean {
+  const frontmatter = frontmatterContent(text);
+  if (frontmatter === null) return false;
+  const pattern = new RegExp(`^${escapeRegExp(NOTE_ENCRYPTED_PLACEHOLDER_PROPERTY)}\\s*:\\s*(true|yes|1)\\s*$`, "im");
+  return pattern.test(frontmatter);
+}
+
+export function encryptedPlaceholderText(input: { path: string; fileRevisionId: number; vaultRevision: number; createdAt: string }): string {
+  return [
+    "---",
+    `${NOTE_ENCRYPTED_PLACEHOLDER_PROPERTY}: true`,
+    "private-sync-encrypted-path: " + JSON.stringify(input.path),
+    `private-sync-encrypted-revision: ${input.fileRevisionId}`,
+    `private-sync-vault-revision: ${input.vaultRevision}`,
+    "private-sync-encrypted-at: " + JSON.stringify(input.createdAt),
+    "---",
+    "",
+    "This note is encrypted on the Private Sync server.",
+    "",
+    "Unlock Private Sync encryption to download and replace this placeholder with the decrypted note."
+  ].join("\n");
 }
 
 function splitNote(text: string): NoteParts {

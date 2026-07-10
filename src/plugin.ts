@@ -159,6 +159,7 @@ export default class PrivateSyncPlugin extends Plugin {
     if (this.settings.rememberEncryptionPassphrase) this.rememberEncryptionPassphrase(trimmed);
     await this.saveSettings();
     this.refreshView();
+    this.syncAfterEncryptionUnlock();
   }
 
   async unlockEncryption(passphrase: string): Promise<void> {
@@ -170,6 +171,7 @@ export default class PrivateSyncPlugin extends Plugin {
     this.encryptionPassphrase = trimmed;
     if (this.settings.rememberEncryptionPassphrase) this.rememberEncryptionPassphrase(trimmed);
     this.refreshView();
+    this.syncAfterEncryptionUnlock();
   }
 
   lockEncryption(): void {
@@ -204,6 +206,15 @@ export default class PrivateSyncPlugin extends Plugin {
 
   private forgetEncryptionPassphrase(): void {
     this.app.secretStorage.setSecret(ENCRYPTION_SECRET_ID, "");
+  }
+
+  private syncAfterEncryptionUnlock(): void {
+    if (!this.settings.deviceToken || !this.settings.vaultLinked) return;
+    if (this.handleOfflineSyncAttempt()) return;
+    this.syncEngine.syncNow().catch((error) => {
+      this.recordErrorEvent("Sync after encryption unlock failed", error).catch(() => undefined);
+      new Notice(`Private Sync: ${errorMessage(error)}`, 10000);
+    });
   }
 
   async savePluginData(partial: StoredData): Promise<void> {

@@ -63,3 +63,16 @@ test("markNoteForServerEncryption keeps note body plaintext", () => {
   assert.equal(marked.endsWith("Plain local body"), true);
   assert.equal(helpers.isEncryptedNoteBody(marked), false);
 });
+
+test("encryptedPlaceholderText creates a detectable ghost note", () => {
+  const placeholder = helpers.encryptedPlaceholderText({
+    path: "Secrets/Hidden.md",
+    fileRevisionId: 42,
+    vaultRevision: 100,
+    createdAt: "2026-07-10T20:45:30.208Z"
+  });
+
+  assert.equal(helpers.isEncryptedPlaceholder(placeholder), true);
+  assert.match(placeholder, /private-sync-encrypted-placeholder: true/);
+  assert.match(placeholder, /Unlock Private Sync encryption/);
+});

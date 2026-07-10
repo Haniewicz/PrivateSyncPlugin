@@ -4,7 +4,7 @@ import { decryptBytes, encryptBytes, sha256, uuid } from "./crypto";
 import { chunkSizeBytes, shouldAutoSyncPath, shouldUseChunkedTransfer } from "./filePolicy";
 import { getLocalFileStat, listLocalCommunityPluginIds, listLocalSyncFiles, readLocalBinary, trashLocalPath, type LocalSyncFile, writeLocalBinary } from "./localFiles";
 import type { LocalIndexStore } from "./localIndex";
-import { isMarkedForServerEncryption } from "./noteEncryption";
+import { encryptedPlaceholderText, isEncryptedPlaceholder, isMarkedForServerEncryption } from "./noteEncryption";
 import type PrivateSyncPlugin from "./plugin";
 import { collectCommunityPluginIds, getCommunityPluginId, shouldSyncPath } from "./settingsSyncPolicy";
 import type { PendingOperation, ServerChange } from "./types";
@@ -72,14 +72,6 @@ export class SyncEngine {
     if (this.plugin.handleOfflineSyncAttempt()) return;
     if (!this.plugin.settings.vaultLinked) {
       new Notice("Private Sync: choose and link a server vault before syncing.", 10000);
-      return;
-    }
-    if (this.plugin.settings.encryptionEnabled && !this.plugin.isEncryptionUnlocked()) {
-      new Notice("Private Sync: unlock encryption before syncing.", 10000);
-      await this.plugin.recordSyncEvent({
-        type: "error",
-        message: "Encryption is enabled but the passphrase is locked."
-      });
       return;
     }
     if (this.running) return;
@@ -301,6 +293,12 @@ export class SyncEngine {
       }
       const content = await readLocalBinary(this.plugin, path);
       const localHash = await sha256(content);
+      if (previous?.status === "pending_download" && isMarkdownPath(path) && isEncryptedPlaceholder(decodeUtf8(content))) {
+        previous.size = file.size;
+        previous.mtime = file.mtime;
+        seen.add(path);
+        continue;
+      }
       if (!previous) {
         index.files[path] = {
           path,
@@ -367,6 +365,16 @@ export class SyncEngine {
       const content = await readLocalBinary(this.plugin, operation.path);
       const plaintextHash = await sha256(content);
       const shouldEncrypt = this.shouldEncryptUpload(operation.path, content);
+      if (shouldEncrypt && !this.plugin.isEncryptionUnlocked()) {
+        const record = index.files[operation.path];
+        if (record) record.status = "pending_upload";
+        await this.plugin.recordSyncEvent({
+          type: "error",
+          path: operation.path,
+          message: `Skipped encrypted upload for ${operation.path}: unlock encryption first.`
+        });
+        continue;
+      }
       const uploadContent = await this.prepareUploadContent(content, shouldEncrypt);
       const contentHash = await sha256(uploadContent);
       operation.contentHash = contentHash;
@@ -470,8 +478,9 @@ export class SyncEngine {
     let queuedUpload = false;
     for (const change of finalChangesByPath.values()) {
       const result = await this.applyServerChange(change, localPluginIds).catch(async (error) => {
-        const record = index.files[change.path];
-        if (record) record.status = "pending_download";
+        if (change.encrypted) {
+          await this.writeEncryptedPlaceholder(change);
+        }
         await this.plugin.recordSyncEvent({
           type: "error",
           path: change.path,
@@ -479,7 +488,7 @@ export class SyncEngine {
           details: { encrypted: Boolean(change.encrypted), fileRevisionId: change.fileRevisionId }
         });
         new Notice(`Private Sync: cannot apply ${change.path}: ${errorMessage(error)}`, 10000);
-        return "blocked" as const;
+        return change.encrypted ? "applied" : ("blocked" as const);
       });
       if (result === "blocked") break;
       queuedUpload = queuedUpload || result === "queued_upload";
@@ -1102,6 +1111,29 @@ export class SyncEngine {
   private async downloadRevisionPlain(revision: { id: number; encrypted: number | boolean }): Promise<ArrayBuffer> {
     const content = await this.api.downloadRevision(this.plugin.settings.vaultId, revision.id);
     return this.decryptRemoteContent(revision, content);
+  }
+
+  private async writeEncryptedPlaceholder(change: ServerChange): Promise<void> {
+    if (!isMarkdownPath(change.path)) return;
+    const content = encodeUtf8(
+      encryptedPlaceholderText({
+        path: change.path,
+        fileRevisionId: change.fileRevisionId,
+        vaultRevision: change.vaultRevision,
+        createdAt: change.createdAt
+      })
+    );
+    await this.writeFile(change.path, content);
+    const stat = await getLocalFileStat(this.plugin, change.path);
+    this.indexStore.get().files[change.path] = {
+      path: change.path,
+      localHash: null,
+      size: stat?.size ?? content.byteLength,
+      mtime: stat?.mtime ?? Date.now(),
+      serverRevisionId: null,
+      status: "pending_download",
+      wasSynced: false
+    };
   }
 
   private async savePairedDevice(deviceId: string, deviceToken: string): Promise<void> {
