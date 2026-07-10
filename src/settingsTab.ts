@@ -6,6 +6,7 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
   private pairingPassword = "";
   private recoveryPairingCode = "";
   private newVaultName = "";
+  private vaultNames = new Map<string, string>();
   private deviceNameSyncTimer: number | null = null;
 
   constructor(app: App, private readonly plugin: PrivateSyncPlugin) {
@@ -228,7 +229,7 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
   private renderVaultSettings(containerEl: HTMLElement): void {
     new Setting(containerEl)
       .setName("Server vault")
-      .setDesc(this.plugin.settings.vaultLinked ? `Linked to ${this.plugin.settings.vaultId}` : "Choose the server vault before linking this local vault.")
+      .setDesc(this.plugin.settings.vaultLinked ? `Linked to ${formatVaultLabel(this.plugin.settings.vaultName, this.plugin.settings.vaultId)}` : "Choose the server vault before linking this local vault.")
       .addDropdown((dropdown) => {
         dropdown.addOption(this.plugin.settings.vaultId, this.plugin.settings.vaultId);
         dropdown.setValue(this.plugin.settings.vaultId);
@@ -311,6 +312,13 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
     const response = await this.plugin.api.getVaults();
     dropdown.selectEl.replaceChildren();
     const vaults = response.vaults.sort((a, b) => a.name.localeCompare(b.name));
+    this.vaultNames = new Map(vaults.map((vault) => [vault.id, vault.name]));
+    const selectedVault = vaults.find((vault) => vault.id === this.plugin.settings.vaultId);
+    if (selectedVault && this.plugin.settings.vaultName !== selectedVault.name) {
+      this.plugin.settings.vaultName = selectedVault.name;
+      await this.plugin.saveSettings();
+      this.plugin.refreshView();
+    }
     if (!vaults.some((vault) => vault.id === this.plugin.settings.vaultId)) {
       dropdown.addOption(this.plugin.settings.vaultId, this.plugin.settings.vaultId);
     }
@@ -327,6 +335,7 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
     if (this.plugin.settings.vaultLinked) throw new Error("This local vault is already linked to a server vault.");
     const vault = await this.plugin.api.createVault({ name });
     this.plugin.settings.vaultId = vault.id;
+    this.plugin.settings.vaultName = vault.name;
     await this.plugin.saveSettings();
     await this.plugin.syncEngine.finishInitialVaultConnection();
     return vault;
@@ -336,9 +345,14 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
     if (!vaultId || vaultId === this.plugin.settings.vaultId) return;
     if (this.plugin.settings.vaultLinked) throw new Error("This local vault is already linked to a server vault.");
     this.plugin.settings.vaultId = vaultId;
+    this.plugin.settings.vaultName = this.vaultNames.get(vaultId) ?? "";
     await this.plugin.saveSettings();
     this.plugin.refreshView();
   }
+}
+
+function formatVaultLabel(name: string, id: string): string {
+  return name ? `${name} (${id})` : id;
 }
 
 function errorMessage(error: unknown): string {

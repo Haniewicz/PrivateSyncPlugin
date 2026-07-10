@@ -10,6 +10,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   deviceId: "",
   localVaultInstanceId: uuid(),
   vaultId: "default",
+  vaultName: "",
   vaultLinked: false,
   autoSync: true,
   syncAttachments: true,

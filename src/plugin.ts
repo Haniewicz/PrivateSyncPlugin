@@ -257,12 +257,18 @@ export default class PrivateSyncPlugin extends Plugin {
       if (message.type === "conflict_resolved") {
         this.refreshView();
       }
+      if (message.type === "vault_updated" && message.vault_id === this.settings.vaultId && typeof message.name === "string") {
+        this.settings.vaultName = message.name;
+        this.saveSettings().catch((error) => new Notice(`Private Sync: cannot save renamed vault: ${errorMessage(error)}`, 10000));
+      }
       if (
         message.type === "request_resolved" ||
         message.type === "device_revoked" ||
         message.type === "device_restored" ||
         message.type === "device_updated" ||
-        message.type === "device_deleted"
+        message.type === "device_deleted" ||
+        message.type === "vault_updated" ||
+        message.type === "vault_deleted"
       ) {
         this.refreshView();
       }
@@ -370,9 +376,9 @@ function errorDetails(error: unknown): Record<string, unknown> {
   return { value: String(error) };
 }
 
-function parseServerEvent(data: unknown): { type?: string } {
+function parseServerEvent(data: unknown): { type?: string; vault_id?: string; name?: string } {
   try {
-    return JSON.parse(String(data)) as { type?: string };
+    return JSON.parse(String(data)) as { type?: string; vault_id?: string; name?: string };
   } catch {
     return {};
   }

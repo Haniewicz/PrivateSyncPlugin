@@ -96,7 +96,8 @@ export class PrivateSyncView extends ItemView {
     this.row(list, "Last applied revision", String(index.lastAppliedRevision));
     this.row(list, "Indexed files", String(files.length));
     this.row(list, "Pending operations", String(index.queue.length));
-    this.row(list, "Server vault", this.plugin.settings.vaultLinked ? this.plugin.settings.vaultId : `${this.plugin.settings.vaultId} (not linked)`);
+    const vault = formatVaultLabel(this.plugin.settings.vaultName, this.plugin.settings.vaultId);
+    this.row(list, "Server vault", this.plugin.settings.vaultLinked ? vault : `${vault} (not linked)`);
     for (const status of ["synced", "pending_upload", "conflict", "locked_by_request", "ignored", "failed"] as const) {
       const matchingFiles = files.filter((file) => file.status === status);
       if (status === "ignored") {
@@ -138,6 +139,7 @@ export class PrivateSyncView extends ItemView {
       .then((response) => {
         list.empty();
         const vaults = response.vaults.sort((left, right) => left.name.localeCompare(right.name));
+        this.updateCurrentVaultName(vaults);
         if (vaults.length === 0) {
           this.row(list, "Status", "no vaults");
           return;
@@ -541,9 +543,22 @@ export class PrivateSyncView extends ItemView {
     };
   }
 
+  private updateCurrentVaultName(vaults: ServerVault[]): void {
+    const current = vaults.find((vault) => vault.id === this.plugin.settings.vaultId);
+    if (!current || this.plugin.settings.vaultName === current.name) return;
+    this.plugin.settings.vaultName = current.name;
+    this.plugin.saveSettings().catch((error) => {
+      new Notice(`Private Sync: cannot update local vault name: ${errorMessage(error)}`, 10000);
+    });
+  }
+
   private renameVault(vault: ServerVault): void {
     new VaultRenameModal(this.plugin, vault, async (name) => {
       await this.plugin.api.renameVault(vault.id, { name });
+      if (vault.id === this.plugin.settings.vaultId) {
+        this.plugin.settings.vaultName = name;
+        await this.plugin.saveSettings();
+      }
       new Notice(`Private Sync: renamed vault to ${name}.`, 8000);
       this.render();
     }).open();
@@ -702,6 +717,10 @@ export class PrivateSyncView extends ItemView {
 function label(tab: Tab): string {
   if (tab === "vaults") return "Vaults";
   return tab.slice(0, 1).toUpperCase() + tab.slice(1);
+}
+
+function formatVaultLabel(name: string, id: string): string {
+  return name ? `${name} (${id})` : id;
 }
 
 class VaultRenameModal extends Modal {

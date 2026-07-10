@@ -1043,6 +1043,7 @@ export class SyncEngine {
     settings.deviceToken = deviceToken;
     settings.password = "";
     settings.vaultLinked = false;
+    settings.vaultName = "";
     await this.plugin.saveSettings();
     new Notice("Private Sync: device paired. Choose and link a server vault.", 10000);
   }

@@ -60,6 +60,7 @@ export type PluginSettings = {
   deviceId: string;
   localVaultInstanceId: string;
   vaultId: string;
+  vaultName: string;
   vaultLinked: boolean;
   autoSync: boolean;
   syncAttachments: boolean;
