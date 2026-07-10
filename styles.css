@@ -252,6 +252,40 @@
   background: var(--background-secondary);
 }
 
+.private-sync-vault-modal {
+  display: grid;
+  gap: 10px;
+  min-width: min(420px, 80vw);
+}
+
+.private-sync-modal-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.private-sync-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.private-sync-vault-delete-warning {
+  color: var(--text-error, var(--color-red));
+  overflow-wrap: break-word;
+}
+
+.private-sync-confirmation-code {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-large);
+  letter-spacing: 0;
+  padding: 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  text-align: center;
+}
+
 .private-sync-conflict-diff-summary {
   margin-bottom: 8px;
 }

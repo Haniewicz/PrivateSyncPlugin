@@ -135,6 +135,8 @@ export type RemoteDevice = {
   id: string;
   name: string;
   type: DeviceType;
+  vaultId: string | null;
+  vaultName: string | null;
   trusted: number;
   revoked_at: string | null;
   last_seen_at: string | null;

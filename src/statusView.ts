@@ -1,4 +1,4 @@
-import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
+import { ItemView, Modal, Notice, WorkspaceLeaf } from "obsidian";
 import { readLocalBinary } from "./localFiles";
 import { parseDevicePairingPayload } from "./pairingApprovalModal";
 import { ConflictDiffModal, decodeText, TextPreviewModal } from "./textPreviewModal";
@@ -11,13 +11,14 @@ import type {
   ServerConflict,
   ServerRequest,
   ServerStorageUsage,
+  ServerVault,
   StorageCleanupTarget,
   SyncEvent
 } from "./types";
 
 export const PRIVATE_SYNC_VIEW = "private-sync-view";
 
-type Tab = "status" | "devices" | "requests" | "conflicts" | "history" | "events" | "storage";
+type Tab = "status" | "devices" | "vaults" | "requests" | "conflicts" | "history" | "events" | "storage";
 
 type ConflictListItem = {
   key: string;
@@ -67,7 +68,7 @@ export class PrivateSyncView extends ItemView {
     this.actionButton(toolbar, "Pair", "primary").onclick = () => this.plugin.syncEngine.pairDevice();
 
     const tabs = root.createDiv({ cls: "private-sync-tabs" });
-    for (const tab of ["status", "devices", "requests", "conflicts", "history", "events", "storage"] as Tab[]) {
+    for (const tab of ["status", "devices", "vaults", "requests", "conflicts", "history", "events", "storage"] as Tab[]) {
       const button = tabs.createEl("button", { text: label(tab), cls: "private-sync-tab" });
       if (tab === this.activeTab) button.addClass("is-active");
       button.onclick = () => {
@@ -78,6 +79,7 @@ export class PrivateSyncView extends ItemView {
 
     if (this.activeTab === "status") this.renderStatus(root);
     if (this.activeTab === "devices") this.renderRemoteList(root, "devices");
+    if (this.activeTab === "vaults") this.renderVaults(root);
     if (this.activeTab === "requests") this.renderRequests(root);
     if (this.activeTab === "conflicts") this.renderConflicts(root);
     if (this.activeTab === "history") this.renderHistory(root);
@@ -119,6 +121,34 @@ export class PrivateSyncView extends ItemView {
       })
       .catch((error) => this.row(list, "Error", error.message));
     this.row(list, "Loading", kind);
+  }
+
+  private renderVaults(root: Element): void {
+    const toolbar = root.createDiv({ cls: "private-sync-toolbar" });
+    toolbar.createDiv({ text: "Server vaults", cls: "private-sync-muted private-sync-event-count" });
+    this.actionButton(toolbar, "Refresh", "subtle").onclick = () => this.render();
+
+    const list = root.createDiv({ cls: "private-sync-list" });
+    if (!this.plugin.settings.deviceToken) {
+      this.row(list, "Status", "not paired");
+      return;
+    }
+    this.plugin.api
+      .getVaults()
+      .then((response) => {
+        list.empty();
+        const vaults = response.vaults.sort((left, right) => left.name.localeCompare(right.name));
+        if (vaults.length === 0) {
+          this.row(list, "Status", "no vaults");
+          return;
+        }
+        for (const vault of vaults) this.vaultRow(list, vault);
+      })
+      .catch((error) => {
+        list.empty();
+        this.row(list, "Error", errorMessage(error));
+      });
+    this.row(list, "Loading", "vaults");
   }
 
   private renderConflicts(root: Element): void {
@@ -446,8 +476,9 @@ export class PrivateSyncView extends ItemView {
     const row = parent.createDiv({ cls: "private-sync-row private-sync-action-row" });
     const details = row.createDiv();
     details.createDiv({ text: device.name });
+    const vault = device.vaultId ? `${device.vaultName ?? "Unnamed vault"} (${device.vaultId})` : "no vault assigned";
     details.createDiv({
-      text: `${device.type} · ${device.revoked_at ? "revoked" : "trusted"} · last seen ${device.last_seen_at ?? "never"}`,
+      text: `${device.type} · ${device.revoked_at ? "revoked" : "trusted"} · ${vault} · last seen ${device.last_seen_at ?? "never"}`,
       cls: "private-sync-muted"
     });
     const toggle = this.actionButton(row, device.revoked_at ? "Restore" : "Revoke", device.revoked_at ? "success" : "danger");
@@ -485,6 +516,45 @@ export class PrivateSyncView extends ItemView {
         remove.textContent = "Delete";
       }
     };
+  }
+
+  private vaultRow(parent: Element, vault: ServerVault): void {
+    const row = parent.createDiv({ cls: "private-sync-row private-sync-action-row" });
+    const details = row.createDiv();
+    details.createDiv({ text: vault.name });
+    const linked = this.plugin.settings.vaultLinked && vault.id === this.plugin.settings.vaultId;
+    details.createDiv({
+      text: `${vault.id} · revision ${vault.currentRevision}${linked ? " · linked to this local vault" : ""}`,
+      cls: "private-sync-muted"
+    });
+    const actions = row.createDiv({ cls: "private-sync-actions" });
+    this.actionButton(actions, "Rename", "subtle").onclick = () => this.renameVault(vault);
+    const remove = this.actionButton(actions, "Delete", "danger");
+    remove.disabled = linked;
+    remove.title = linked ? "This vault is linked to the current local Obsidian vault and cannot be deleted here." : "";
+    remove.onclick = () => {
+      if (linked) {
+        new Notice("Private Sync: cannot delete the server vault linked to this local vault.", 8000);
+        return;
+      }
+      this.confirmDeleteVault(vault);
+    };
+  }
+
+  private renameVault(vault: ServerVault): void {
+    new VaultRenameModal(this.plugin, vault, async (name) => {
+      await this.plugin.api.renameVault(vault.id, { name });
+      new Notice(`Private Sync: renamed vault to ${name}.`, 8000);
+      this.render();
+    }).open();
+  }
+
+  private confirmDeleteVault(vault: ServerVault): void {
+    new VaultDeleteModal(this.plugin, vault, async () => {
+      await this.plugin.api.deleteVault(vault.id);
+      new Notice(`Private Sync: deleted vault ${vault.name}.`, 8000);
+      this.render();
+    }).open();
   }
 
   private conflictRow(parent: Element, conflict: ConflictListItem): void {
@@ -630,7 +700,147 @@ export class PrivateSyncView extends ItemView {
 }
 
 function label(tab: Tab): string {
+  if (tab === "vaults") return "Vaults";
   return tab.slice(0, 1).toUpperCase() + tab.slice(1);
+}
+
+class VaultRenameModal extends Modal {
+  private input: HTMLInputElement | null = null;
+  private saveButton: HTMLButtonElement | null = null;
+
+  constructor(
+    plugin: PrivateSyncPlugin,
+    private readonly vault: ServerVault,
+    private readonly onSave: (name: string) => Promise<void>
+  ) {
+    super(plugin.app);
+  }
+
+  onOpen(): void {
+    this.contentEl.empty();
+    this.contentEl.addClass("private-sync-vault-modal");
+    this.contentEl.createEl("h2", { text: "Rename vault" });
+    this.contentEl.createDiv({ text: `${this.vault.name} (${this.vault.id})`, cls: "private-sync-muted" });
+    this.input = this.contentEl.createEl("input", {
+      type: "text",
+      value: this.vault.name,
+      cls: "private-sync-modal-input"
+    });
+    this.input.oninput = () => this.updateState();
+    this.input.onkeydown = (event) => {
+      if (event.key === "Enter") this.save();
+    };
+    const actions = this.contentEl.createDiv({ cls: "private-sync-modal-actions" });
+    actions.createEl("button", { text: "Cancel", cls: "private-sync-button private-sync-button-subtle" }).onclick = () => this.close();
+    this.saveButton = actions.createEl("button", { text: "Save", cls: "private-sync-button private-sync-button-primary" });
+    this.saveButton.onclick = () => this.save();
+    this.updateState();
+    this.input.focus();
+    this.input.select();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+
+  private updateState(): void {
+    if (!this.input || !this.saveButton) return;
+    this.saveButton.disabled = this.input.value.trim().length === 0 || this.input.value.trim() === this.vault.name;
+  }
+
+  private async save(): Promise<void> {
+    if (!this.input || !this.saveButton || this.saveButton.disabled) return;
+    const name = this.input.value.trim();
+    this.saveButton.disabled = true;
+    this.saveButton.textContent = "Saving...";
+    try {
+      await this.onSave(name);
+      this.close();
+    } catch (error) {
+      new Notice(`Private Sync vault rename failed: ${errorMessage(error)}`, 10000);
+      this.saveButton.disabled = false;
+      this.saveButton.textContent = "Save";
+      this.updateState();
+    }
+  }
+}
+
+class VaultDeleteModal extends Modal {
+  private readonly code = randomConfirmationCode();
+  private input: HTMLInputElement | null = null;
+  private deleteButton: HTMLButtonElement | null = null;
+
+  constructor(
+    plugin: PrivateSyncPlugin,
+    private readonly vault: ServerVault,
+    private readonly onDelete: () => Promise<void>
+  ) {
+    super(plugin.app);
+  }
+
+  onOpen(): void {
+    this.contentEl.empty();
+    this.contentEl.addClass("private-sync-vault-modal");
+    this.contentEl.createEl("h2", { text: "Delete vault" });
+    this.contentEl.createDiv({ text: `${this.vault.name} (${this.vault.id})`, cls: "private-sync-muted" });
+    this.contentEl.createDiv({
+      text: "This operation is irreversible. Deleted vault data cannot be recovered.",
+      cls: "private-sync-vault-delete-warning"
+    });
+    this.contentEl.createDiv({ text: this.code, cls: "private-sync-confirmation-code" });
+    this.input = this.contentEl.createEl("input", {
+      type: "text",
+      placeholder: "Type the code to confirm",
+      cls: "private-sync-modal-input"
+    });
+    this.input.oninput = () => {
+      this.input!.value = this.input!.value.toUpperCase();
+      this.updateState();
+    };
+    this.input.onkeydown = (event) => {
+      if (event.key === "Enter") this.delete();
+    };
+    const actions = this.contentEl.createDiv({ cls: "private-sync-modal-actions" });
+    actions.createEl("button", { text: "Cancel", cls: "private-sync-button private-sync-button-subtle" }).onclick = () => this.close();
+    this.deleteButton = actions.createEl("button", {
+      text: "Delete permanently",
+      cls: "private-sync-button private-sync-button-danger"
+    });
+    this.deleteButton.onclick = () => this.delete();
+    this.updateState();
+    this.input.focus();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+
+  private updateState(): void {
+    if (!this.input || !this.deleteButton) return;
+    this.deleteButton.disabled = this.input.value.trim() !== this.code;
+  }
+
+  private async delete(): Promise<void> {
+    if (!this.deleteButton || this.deleteButton.disabled) return;
+    this.deleteButton.disabled = true;
+    this.deleteButton.textContent = "Deleting...";
+    try {
+      await this.onDelete();
+      this.close();
+    } catch (error) {
+      new Notice(`Private Sync vault delete failed: ${errorMessage(error)}`, 10000);
+      this.deleteButton.disabled = false;
+      this.deleteButton.textContent = "Delete permanently";
+      this.updateState();
+    }
+  }
+}
+
+function randomConfirmationCode(): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const values = new Uint8Array(6);
+  crypto.getRandomValues(values);
+  return Array.from(values, (value) => alphabet[value % alphabet.length]).join("");
 }
 
 function buildConflictItems(localConflicts: LocalFileRecord[], remoteConflicts: ServerConflict[]): ConflictListItem[] {

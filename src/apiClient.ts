@@ -54,6 +54,14 @@ export class ApiClient {
     return this.post("/api/v1/vaults", input);
   }
 
+  async renameVault(vaultId: string, input: { name: string }): Promise<ServerVault> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/rename`, input);
+  }
+
+  async deleteVault(vaultId: string): Promise<{ ok: true }> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/delete`, {});
+  }
+
   async assessVaultConnection(
     vaultId: string,
     input: { localVaultInstanceId: string; localFileCount: number; localManifestHash: string }
