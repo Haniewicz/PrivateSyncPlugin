@@ -4,10 +4,10 @@ import { decryptBytes, encryptBytes, sha256, uuid } from "./crypto";
 import { chunkSizeBytes, shouldAutoSyncPath, shouldUseChunkedTransfer } from "./filePolicy";
 import { getLocalFileStat, listLocalCommunityPluginIds, listLocalSyncFiles, readLocalBinary, trashLocalPath, type LocalSyncFile, writeLocalBinary } from "./localFiles";
 import type { LocalIndexStore } from "./localIndex";
-import { encryptedPlaceholderText, isEncryptedPlaceholder, isMarkedForServerEncryption } from "./noteEncryption";
+import { encryptedPlaceholderInfo, encryptedPlaceholderText, isEncryptedPlaceholder, isMarkedForServerEncryption } from "./noteEncryption";
 import type PrivateSyncPlugin from "./plugin";
 import { collectCommunityPluginIds, getCommunityPluginId, shouldSyncPath } from "./settingsSyncPolicy";
-import type { PendingOperation, ServerChange } from "./types";
+import type { LocalFileRecord, PendingOperation, ServerChange } from "./types";
 import { openVaultConnectionModal } from "./vaultConnectionModal";
 import { buildLocalVaultManifest } from "./vaultManifest";
 
@@ -31,6 +31,7 @@ type ThreeWayMergeResult = {
 
 export class SyncEngine {
   private running = false;
+  private runAgain = false;
 
   constructor(
     private readonly plugin: PrivateSyncPlugin,
@@ -74,15 +75,22 @@ export class SyncEngine {
       new Notice("Private Sync: choose and link a server vault before syncing.", 10000);
       return;
     }
-    if (this.running) return;
+    if (this.running) {
+      this.runAgain = true;
+      return;
+    }
     this.running = true;
     try {
-      await this.scanLocalChanges();
-      await this.pushQueue();
-      await this.pullChanges();
-      await this.reconcileResolvedLocalConflicts();
-      await this.recordSyncStateIfComplete();
-      this.plugin.refreshView();
+      do {
+        this.runAgain = false;
+        await this.scanLocalChanges();
+        await this.pushQueue();
+        await this.pullChanges();
+        await this.downloadPendingEncryptedPlaceholders();
+        await this.reconcileResolvedLocalConflicts();
+        await this.recordSyncStateIfComplete();
+        this.plugin.refreshView();
+      } while (this.runAgain);
     } finally {
       this.running = false;
     }
@@ -292,13 +300,24 @@ export class SyncEngine {
         continue;
       }
       const content = await readLocalBinary(this.plugin, path);
-      const localHash = await sha256(content);
-      if (previous?.status === "pending_download" && isMarkdownPath(path) && isEncryptedPlaceholder(decodeUtf8(content))) {
-        previous.size = file.size;
-        previous.mtime = file.mtime;
-        seen.add(path);
-        continue;
+      if (isMarkdownPath(path)) {
+        const placeholderInfo = encryptedPlaceholderInfo(decodeUtf8(content));
+        if (placeholderInfo) {
+          index.files[path] = {
+            path,
+            localHash: null,
+            size: file.size,
+            mtime: file.mtime,
+            serverRevisionId: placeholderInfo.fileRevisionId ?? previous?.serverRevisionId ?? null,
+            status: "pending_download",
+            wasSynced: true
+          };
+          await this.indexStore.removePathFromQueue(path);
+          seen.add(path);
+          continue;
+        }
       }
+      const localHash = await sha256(content);
       if (!previous) {
         index.files[path] = {
           path,
@@ -654,6 +673,12 @@ export class SyncEngine {
       record.status = "conflict";
       return "applied";
     }
+    if (this.isEncryptedPlaceholderRecord(record, change)) {
+      if (!this.plugin.isEncryptionUnlocked()) {
+        await this.writeEncryptedPlaceholder(change);
+        return "applied";
+      }
+    }
     if (record?.status === "dirty_local" || record?.status === "pending_upload") {
       return this.mergeRemoteChangeWithLocal(change, record);
     }
@@ -878,8 +903,65 @@ export class SyncEngine {
     const stat = await getLocalFileStat(this.plugin, path);
     if (!stat) return false;
     const content = await readLocalBinary(this.plugin, path);
+    if (isMarkdownPath(path) && isEncryptedPlaceholder(decodeUtf8(content))) return false;
     const currentHash = await sha256(content);
     return currentHash !== indexedHash;
+  }
+
+  private async downloadPendingEncryptedPlaceholders(): Promise<void> {
+    if (!this.plugin.isEncryptionUnlocked()) return;
+    const index = this.indexStore.get();
+    const pendingPaths = Object.values(index.files)
+      .filter((record) => record.status === "pending_download")
+      .map((record) => record.path);
+    for (const path of pendingPaths) {
+      const record = index.files[path];
+      if (!record) continue;
+      const history = await this.api.history(this.plugin.settings.vaultId, path);
+      const current = history.history[0];
+      if (!current) continue;
+      if (current.deleted) {
+        await trashLocalPath(this.plugin, path);
+        index.files[path] = {
+          path,
+          localHash: null,
+          size: 0,
+          mtime: Date.now(),
+          serverRevisionId: current.id,
+          status: "synced",
+          wasSynced: true
+        };
+        continue;
+      }
+      if (!current.encrypted) continue;
+      try {
+        const content = await this.downloadRevisionPlain(current);
+        await this.writeFile(path, content);
+        index.files[path] = {
+          path,
+          localHash: remotePlaintextHash(current),
+          size: remotePlaintextSize(current),
+          mtime: Date.now(),
+          serverRevisionId: current.id,
+          status: "synced",
+          wasSynced: true
+        };
+        await this.plugin.recordSyncEvent({
+          type: "manual_resolution",
+          path,
+          message: `Downloaded encrypted placeholder after unlock for ${path}`,
+          details: { serverRevisionId: current.id }
+        });
+      } catch (error) {
+        await this.plugin.recordSyncEvent({
+          type: "error",
+          path,
+          message: `Cannot download encrypted placeholder for ${path}: ${errorMessage(error)}`,
+          details: { serverRevisionId: current.id }
+        });
+      }
+    }
+    await this.indexStore.save();
   }
 
   private async tryAutoMergeConflicts(operations: PendingOperation[]): Promise<Set<string>> {
@@ -1130,10 +1212,14 @@ export class SyncEngine {
       localHash: null,
       size: stat?.size ?? content.byteLength,
       mtime: stat?.mtime ?? Date.now(),
-      serverRevisionId: null,
+      serverRevisionId: change.fileRevisionId,
       status: "pending_download",
-      wasSynced: false
+      wasSynced: true
     };
+  }
+
+  private isEncryptedPlaceholderRecord(record: LocalFileRecord | undefined, change: ServerChange): boolean {
+    return Boolean(record && record.status === "pending_download" && change.encrypted && isMarkdownPath(change.path));
   }
 
   private async savePairedDevice(deviceId: string, deviceToken: string): Promise<void> {

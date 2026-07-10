@@ -75,4 +75,9 @@ test("encryptedPlaceholderText creates a detectable ghost note", () => {
   assert.equal(helpers.isEncryptedPlaceholder(placeholder), true);
   assert.match(placeholder, /private-sync-encrypted-placeholder: true/);
   assert.match(placeholder, /Unlock Private Sync encryption/);
+  assert.deepEqual(helpers.encryptedPlaceholderInfo(placeholder), {
+    path: "Secrets/Hidden.md",
+    fileRevisionId: 42,
+    vaultRevision: 100
+  });
 });

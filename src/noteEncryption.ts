@@ -68,6 +68,22 @@ export function isEncryptedPlaceholder(text: string): boolean {
   return pattern.test(frontmatter);
 }
 
+export type EncryptedPlaceholderInfo = {
+  path?: string;
+  fileRevisionId?: number;
+  vaultRevision?: number;
+};
+
+export function encryptedPlaceholderInfo(text: string): EncryptedPlaceholderInfo | null {
+  const frontmatter = frontmatterContent(text);
+  if (frontmatter === null || !isEncryptedPlaceholder(text)) return null;
+  return {
+    path: frontmatterStringProperty(frontmatter, "private-sync-encrypted-path"),
+    fileRevisionId: frontmatterNumberProperty(frontmatter, "private-sync-encrypted-revision"),
+    vaultRevision: frontmatterNumberProperty(frontmatter, "private-sync-vault-revision")
+  };
+}
+
 export function encryptedPlaceholderText(input: { path: string; fileRevisionId: number; vaultRevision: number; createdAt: string }): string {
   return [
     "---",
@@ -99,6 +115,25 @@ function isEncryptedBody(body: string): boolean {
 
 function frontmatterContent(text: string): string | null {
   return frontmatterMatch(text)?.content ?? null;
+}
+
+function frontmatterStringProperty(frontmatter: string, property: string): string | undefined {
+  const pattern = new RegExp(`^${escapeRegExp(property)}\\s*:\\s*(.+?)\\s*$`, "im");
+  const value = frontmatter.match(pattern)?.[1]?.trim();
+  if (!value) return undefined;
+  if (value.startsWith('"') && value.endsWith('"')) {
+    try {
+      return JSON.parse(value) as string;
+    } catch {
+      return value.slice(1, -1);
+    }
+  }
+  return value;
+}
+
+function frontmatterNumberProperty(frontmatter: string, property: string): number | undefined {
+  const value = frontmatter.match(new RegExp(`^${escapeRegExp(property)}\\s*:\\s*(\\d+)\\s*$`, "im"))?.[1];
+  return value ? Number(value) : undefined;
 }
 
 function frontmatterMatch(text: string): { content: string; bodyStart: number; after: string } | null {
