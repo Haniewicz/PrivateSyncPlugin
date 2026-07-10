@@ -20,7 +20,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   largeFileChunkSizeMb: 5,
   largeFileThresholdMb: 10,
   encryptionEnabled: false,
-  encryptionKeyCheck: ""
+  encryptionKeyCheck: "",
+  rememberEncryptionPassphrase: false
 };
 
 export const DEFAULT_INDEX: LocalIndex = {

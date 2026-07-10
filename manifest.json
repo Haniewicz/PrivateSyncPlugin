@@ -1,8 +1,8 @@
 {
   "id": "private-sync",
   "name": "Private Sync",
-  "version": "0.1.0-dev0.37",
-  "minAppVersion": "1.7.0",
+  "version": "0.1.0-dev0.38",
+  "minAppVersion": "1.11.4",
   "description": "Synchronize an Obsidian vault with a private server.",
   "author": "Haniewicz",
   "isDesktopOnly": false

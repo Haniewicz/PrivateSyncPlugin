@@ -75,6 +75,7 @@ export type PluginSettings = {
   largeFileThresholdMb: number;
   encryptionEnabled: boolean;
   encryptionKeyCheck: string;
+  rememberEncryptionPassphrase: boolean;
 };
 
 export type ServerVault = {

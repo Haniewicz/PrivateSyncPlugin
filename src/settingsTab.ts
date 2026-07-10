@@ -334,8 +334,22 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Remember encryption passphrase locally")
+      .setDesc("Stores the passphrase in Obsidian SecretStorage on this device so encryption unlocks automatically after restart.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.rememberEncryptionPassphrase).onChange(async (value) => {
+          await this.plugin.setRememberEncryptionPassphrase(value);
+          this.display();
+        })
+      );
+
+    new Setting(containerEl)
       .setName(this.plugin.settings.encryptionKeyCheck ? "Change encryption passphrase" : "Set encryption passphrase")
-      .setDesc("The passphrase is not saved. It unlocks encryption for the current Obsidian session.")
+      .setDesc(
+        this.plugin.settings.rememberEncryptionPassphrase
+          ? "The passphrase unlocks encryption and is stored locally in Obsidian SecretStorage."
+          : "The passphrase is not saved. It unlocks encryption for the current Obsidian session."
+      )
       .addText((text) =>
         text
           .setPlaceholder("Passphrase")

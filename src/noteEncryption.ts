@@ -14,6 +14,14 @@ export async function encryptNoteBodyText(text: string, passphrase: string): Pro
   return parts.prefix + (await encryptTextFragment(parts.body, passphrase));
 }
 
+export function markNoteForServerEncryption(text: string): string {
+  return setAutoEncryptProperty(text, true);
+}
+
+export function unmarkNoteForServerEncryption(text: string): string {
+  return setAutoEncryptProperty(text, false);
+}
+
 export async function decryptNoteBodyText(text: string, passphrase: string): Promise<string> {
   const parts = splitNote(text);
   if (!isEncryptedBody(parts.body)) throw new Error("The note body is not encrypted.");
@@ -46,6 +54,10 @@ export function setAutoEncryptProperty(text: string, enabled: boolean): string {
 
 export function isEncryptedNoteBody(text: string): boolean {
   return isEncryptedBody(splitNote(text).body);
+}
+
+export function isMarkedForServerEncryption(text: string): boolean {
+  return hasAutoEncryptProperty(text);
 }
 
 function splitNote(text: string): NoteParts {

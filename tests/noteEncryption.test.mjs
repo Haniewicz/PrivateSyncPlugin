@@ -54,3 +54,12 @@ test("auto-encrypt property is inserted when a note has no frontmatter", () => {
   assert.equal(helpers.hasAutoEncryptProperty(enabled), true);
   assert.equal(enabled, "---\nprivate-sync-encrypt: true\n---\n\nBody");
 });
+
+test("markNoteForServerEncryption keeps note body plaintext", () => {
+  const note = "Plain local body";
+  const marked = helpers.markNoteForServerEncryption(note);
+
+  assert.equal(helpers.hasAutoEncryptProperty(marked), true);
+  assert.equal(marked.endsWith("Plain local body"), true);
+  assert.equal(helpers.isEncryptedNoteBody(marked), false);
+});

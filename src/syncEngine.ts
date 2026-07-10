@@ -4,6 +4,7 @@ import { decryptBytes, encryptBytes, sha256, uuid } from "./crypto";
 import { chunkSizeBytes, shouldAutoSyncPath, shouldUseChunkedTransfer } from "./filePolicy";
 import { getLocalFileStat, listLocalCommunityPluginIds, listLocalSyncFiles, readLocalBinary, trashLocalPath, type LocalSyncFile, writeLocalBinary } from "./localFiles";
 import type { LocalIndexStore } from "./localIndex";
+import { isMarkedForServerEncryption } from "./noteEncryption";
 import type PrivateSyncPlugin from "./plugin";
 import { collectCommunityPluginIds, getCommunityPluginId, shouldSyncPath } from "./settingsSyncPolicy";
 import type { PendingOperation, ServerChange } from "./types";
@@ -84,7 +85,6 @@ export class SyncEngine {
     if (this.running) return;
     this.running = true;
     try {
-      await this.plugin.encryptMarkedNotesBeforeSync();
       await this.scanLocalChanges();
       await this.pushQueue();
       await this.pullChanges();
@@ -366,13 +366,14 @@ export class SyncEngine {
       if (!stat) continue;
       const content = await readLocalBinary(this.plugin, operation.path);
       const plaintextHash = await sha256(content);
-      const uploadContent = await this.prepareUploadContent(content);
+      const shouldEncrypt = this.shouldEncryptUpload(operation.path, content);
+      const uploadContent = await this.prepareUploadContent(content, shouldEncrypt);
       const contentHash = await sha256(uploadContent);
       operation.contentHash = contentHash;
       operation.size = uploadContent.byteLength;
-      operation.encrypted = this.plugin.settings.encryptionEnabled;
-      operation.plaintextHash = this.plugin.settings.encryptionEnabled ? plaintextHash : undefined;
-      operation.plaintextSize = this.plugin.settings.encryptionEnabled ? content.byteLength : undefined;
+      operation.encrypted = shouldEncrypt;
+      operation.plaintextHash = shouldEncrypt ? plaintextHash : undefined;
+      operation.plaintextSize = shouldEncrypt ? content.byteLength : undefined;
       const record = index.files[operation.path];
       if (record) {
         record.localHash = plaintextHash;
@@ -1079,9 +1080,15 @@ export class SyncEngine {
     });
   }
 
-  private async prepareUploadContent(content: ArrayBuffer): Promise<ArrayBuffer> {
-    if (!this.plugin.settings.encryptionEnabled) return content;
+  private async prepareUploadContent(content: ArrayBuffer, shouldEncrypt: boolean): Promise<ArrayBuffer> {
+    if (!shouldEncrypt) return content;
     return encryptBytes(content, this.plugin.requireEncryptionPassphrase());
+  }
+
+  private shouldEncryptUpload(path: string, content: ArrayBuffer): boolean {
+    if (this.plugin.settings.encryptionEnabled) return true;
+    if (!isMarkdownPath(path)) return false;
+    return isMarkedForServerEncryption(new TextDecoder().decode(content));
   }
 
   private async decryptRemoteContent(
@@ -1162,6 +1169,11 @@ function remotePlaintextSize(revision: { size: number; encrypted: number | boole
 function isTextLikePath(path: string): boolean {
   const extension = path.split(".").pop()?.toLowerCase() ?? "";
   return extension === "md" || extension === "markdown" || extension === "txt";
+}
+
+function isMarkdownPath(path: string): boolean {
+  const extension = path.split(".").pop()?.toLowerCase() ?? "";
+  return extension === "md" || extension === "markdown";
 }
 
 function mergeTextThreeWay(baseText: string, localText: string, remoteText: string): ThreeWayMergeResult | null {

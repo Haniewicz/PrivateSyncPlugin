@@ -3,7 +3,7 @@ import { ApiClient } from "./apiClient";
 import { createEncryptionKeyCheck, decryptTextFragment, encryptTextFragment, uuid, verifyEncryptionKeyCheck } from "./crypto";
 import { DEFAULT_INDEX, DEFAULT_SETTINGS } from "./defaults";
 import { LocalIndexStore } from "./localIndex";
-import { decryptNoteBodyText, encryptNoteBodyText, hasAutoEncryptProperty, isEncryptedNoteBody, setAutoEncryptProperty } from "./noteEncryption";
+import { decryptNoteBodyText, markNoteForServerEncryption, unmarkNoteForServerEncryption } from "./noteEncryption";
 import { PairingApprovalModal, parseDevicePairingPayload } from "./pairingApprovalModal";
 import { PrivateSyncSettingTab } from "./settingsTab";
 import { SyncEngine } from "./syncEngine";
@@ -15,6 +15,8 @@ type StoredData = {
   index?: LocalIndex;
   events?: SyncEvent[];
 };
+
+const ENCRYPTION_SECRET_ID = "private-sync-encryption-passphrase";
 
 export default class PrivateSyncPlugin extends Plugin {
   settings: PluginSettings = { ...DEFAULT_SETTINGS };
@@ -32,6 +34,7 @@ export default class PrivateSyncPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    await this.loadRememberedEncryptionPassphrase();
     await this.loadEvents();
     await this.indexStore.load();
     this.recreateApi();
@@ -75,8 +78,8 @@ export default class PrivateSyncPlugin extends Plugin {
     });
     this.addCommand({
       id: "private-sync-encrypt-note-body",
-      name: "Encrypt current note body",
-      editorCallback: (editor) => this.encryptCurrentNoteBody(editor, false)
+      name: "Encrypt current note on server",
+      editorCallback: (editor) => this.markCurrentNoteForServerEncryption(editor)
     });
     this.addCommand({
       id: "private-sync-decrypt-note-body",
@@ -85,12 +88,12 @@ export default class PrivateSyncPlugin extends Plugin {
     });
     this.addCommand({
       id: "private-sync-enable-note-auto-encryption",
-      name: "Enable auto-encryption for current note",
-      editorCallback: (editor) => this.encryptCurrentNoteBody(editor, true)
+      name: "Enable server encryption for current note",
+      editorCallback: (editor) => this.markCurrentNoteForServerEncryption(editor)
     });
     this.addCommand({
       id: "private-sync-disable-note-auto-encryption",
-      name: "Disable auto-encryption for current note",
+      name: "Disable server encryption for current note",
       editorCallback: (editor) => this.disableCurrentNoteAutoEncryption(editor)
     });
 
@@ -153,6 +156,7 @@ export default class PrivateSyncPlugin extends Plugin {
     if (!trimmed) throw new Error("Encryption passphrase cannot be empty.");
     this.settings.encryptionKeyCheck = await createEncryptionKeyCheck(trimmed);
     this.encryptionPassphrase = trimmed;
+    if (this.settings.rememberEncryptionPassphrase) this.rememberEncryptionPassphrase(trimmed);
     await this.saveSettings();
     this.refreshView();
   }
@@ -164,6 +168,7 @@ export default class PrivateSyncPlugin extends Plugin {
       throw new Error("Encryption passphrase is incorrect.");
     }
     this.encryptionPassphrase = trimmed;
+    if (this.settings.rememberEncryptionPassphrase) this.rememberEncryptionPassphrase(trimmed);
     this.refreshView();
   }
 
@@ -172,17 +177,33 @@ export default class PrivateSyncPlugin extends Plugin {
     this.refreshView();
   }
 
-  async encryptMarkedNotesBeforeSync(): Promise<void> {
-    const files = this.app.vault.getMarkdownFiles();
-    let encrypted = 0;
-    for (const file of files) {
-      const text = await this.app.vault.read(file);
-      if (!hasAutoEncryptProperty(text) || isEncryptedNoteBody(text)) continue;
-      const nextText = await encryptNoteBodyText(text, this.requireEncryptionPassphrase());
-      await this.app.vault.modify(file, nextText);
-      encrypted += 1;
+  async setRememberEncryptionPassphrase(remember: boolean): Promise<void> {
+    this.settings.rememberEncryptionPassphrase = remember;
+    if (remember && this.encryptionPassphrase) {
+      this.rememberEncryptionPassphrase(this.encryptionPassphrase);
+    } else if (!remember) {
+      this.forgetEncryptionPassphrase();
     }
-    if (encrypted > 0) new Notice(`Private Sync: encrypted ${encrypted} marked note${encrypted === 1 ? "" : "s"}.`, 5000);
+    await this.saveSettings();
+  }
+
+  private async loadRememberedEncryptionPassphrase(): Promise<void> {
+    if (!this.settings.rememberEncryptionPassphrase || !this.settings.encryptionKeyCheck) return;
+    const passphrase = this.app.secretStorage.getSecret(ENCRYPTION_SECRET_ID);
+    if (!passphrase) return;
+    if (await verifyEncryptionKeyCheck(this.settings.encryptionKeyCheck, passphrase)) {
+      this.encryptionPassphrase = passphrase;
+    } else {
+      this.forgetEncryptionPassphrase();
+    }
+  }
+
+  private rememberEncryptionPassphrase(passphrase: string): void {
+    this.app.secretStorage.setSecret(ENCRYPTION_SECRET_ID, passphrase);
+  }
+
+  private forgetEncryptionPassphrase(): void {
+    this.app.secretStorage.setSecret(ENCRYPTION_SECRET_ID, "");
   }
 
   async savePluginData(partial: StoredData): Promise<void> {
@@ -444,14 +465,12 @@ export default class PrivateSyncPlugin extends Plugin {
     }
   }
 
-  private async encryptCurrentNoteBody(editor: Editor, enableAutoEncryption: boolean): Promise<void> {
+  private markCurrentNoteForServerEncryption(editor: Editor): void {
     try {
-      const text = enableAutoEncryption ? setAutoEncryptProperty(editor.getValue(), true) : editor.getValue();
-      const encrypted = await encryptNoteBodyText(text, this.requireEncryptionPassphrase());
-      editor.setValue(encrypted);
-      new Notice(enableAutoEncryption ? "Private Sync: note body encrypted and marked for auto-encryption." : "Private Sync: note body encrypted.", 5000);
+      editor.setValue(markNoteForServerEncryption(editor.getValue()));
+      new Notice("Private Sync: this note will stay readable locally and be encrypted before upload.", 7000);
     } catch (error) {
-      new Notice(`Private Sync note encryption failed: ${errorMessage(error)}`, 10000);
+      new Notice(`Private Sync: cannot mark note for encryption: ${errorMessage(error)}`, 10000);
     }
   }
 
@@ -467,8 +486,8 @@ export default class PrivateSyncPlugin extends Plugin {
 
   private disableCurrentNoteAutoEncryption(editor: Editor): void {
     try {
-      editor.setValue(setAutoEncryptProperty(editor.getValue(), false));
-      new Notice("Private Sync: note auto-encryption disabled.", 5000);
+      editor.setValue(unmarkNoteForServerEncryption(editor.getValue()));
+      new Notice("Private Sync: server encryption disabled for this note.", 5000);
     } catch (error) {
       new Notice(`Private Sync: cannot disable note auto-encryption: ${errorMessage(error)}`, 10000);
     }
