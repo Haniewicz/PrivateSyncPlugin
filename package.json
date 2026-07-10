@@ -1,11 +1,12 @@
 {
   "name": "private-sync-plugin",
-  "version": "0.1.0-dev0.35",
+  "version": "0.1.0-dev0.36",
   "description": "Private server sync plugin for Obsidian.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs --watch",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "node --test tests/crypto.test.mjs",
     "typecheck": "tsc -noEmit -skipLibCheck"
   },
   "keywords": [

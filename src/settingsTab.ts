@@ -5,6 +5,8 @@ import type { DeviceType, ServerVault } from "./types";
 export class PrivateSyncSettingTab extends PluginSettingTab {
   private pairingPassword = "";
   private recoveryPairingCode = "";
+  private encryptionPassphrase = "";
+  private encryptionUnlockPassphrase = "";
   private newVaultName = "";
   private vaultNames = new Map<string, string>();
   private deviceNameSyncTimer: number | null = null;
@@ -162,6 +164,8 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
         })
       );
 
+    this.renderEncryptionSettings(containerEl);
+
     new Setting(containerEl)
       .setName("Max automatic file size")
       .setDesc("Files above this size are indexed as ignored and are not uploaded automatically.")
@@ -305,6 +309,106 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
           }
         })
       );
+  }
+
+  private renderEncryptionSettings(containerEl: HTMLElement): void {
+    new Setting(containerEl).setName("End-to-end encryption").setHeading();
+
+    new Setting(containerEl)
+      .setName("Encrypt synced file contents")
+      .setDesc("Encrypts synced file blobs before upload. The server stores ciphertext and cannot recover the passphrase.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.encryptionEnabled)
+          .setDisabled(!this.plugin.settings.encryptionKeyCheck)
+          .onChange(async (value) => {
+            if (value && !this.plugin.settings.encryptionKeyCheck) {
+              new Notice("Private Sync: set an encryption passphrase first.", 8000);
+              this.display();
+              return;
+            }
+            this.plugin.settings.encryptionEnabled = value;
+            await this.plugin.saveSettings();
+            this.display();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName(this.plugin.settings.encryptionKeyCheck ? "Change encryption passphrase" : "Set encryption passphrase")
+      .setDesc("The passphrase is not saved. It unlocks encryption for the current Obsidian session.")
+      .addText((text) =>
+        text
+          .setPlaceholder("Passphrase")
+          .setValue(this.encryptionPassphrase)
+          .onChange((value) => {
+            this.encryptionPassphrase = value;
+          })
+      )
+      .addButton((button) =>
+        button.setButtonText("Save").setClass("private-sync-button").setClass("private-sync-button-primary").onClick(async () => {
+          button.setDisabled(true);
+          button.setButtonText("Saving...");
+          try {
+            await this.plugin.setEncryptionPassphrase(this.encryptionPassphrase);
+            this.encryptionPassphrase = "";
+            new Notice("Private Sync: encryption passphrase saved and unlocked.", 8000);
+            this.display();
+          } catch (error) {
+            new Notice(`Private Sync encryption setup failed: ${errorMessage(error)}`, 10000);
+          } finally {
+            button.setDisabled(false);
+            button.setButtonText("Save");
+          }
+        })
+      )
+      .then((setting) => {
+        const input = setting.controlEl.querySelector("input");
+        if (input) input.type = "password";
+      });
+
+    new Setting(containerEl)
+      .setName("Unlock encryption")
+      .setDesc(this.plugin.isEncryptionUnlocked() ? "Encryption is unlocked for this session." : "Required after restarting Obsidian before encrypted sync or fragment commands can decrypt data.")
+      .addText((text) =>
+        text
+          .setPlaceholder("Passphrase")
+          .setValue(this.encryptionUnlockPassphrase)
+          .setDisabled(!this.plugin.settings.encryptionKeyCheck || this.plugin.isEncryptionUnlocked())
+          .onChange((value) => {
+            this.encryptionUnlockPassphrase = value;
+          })
+      )
+      .addButton((button) =>
+        button
+          .setButtonText(this.plugin.isEncryptionUnlocked() ? "Lock" : "Unlock")
+          .setClass("private-sync-button")
+          .setClass(this.plugin.isEncryptionUnlocked() ? "private-sync-button-subtle" : "private-sync-button-primary")
+          .setDisabled(!this.plugin.settings.encryptionKeyCheck)
+          .onClick(async () => {
+            if (this.plugin.isEncryptionUnlocked()) {
+              this.plugin.lockEncryption();
+              this.display();
+              return;
+            }
+            button.setDisabled(true);
+            button.setButtonText("Unlocking...");
+            try {
+              await this.plugin.unlockEncryption(this.encryptionUnlockPassphrase);
+              this.encryptionUnlockPassphrase = "";
+              new Notice("Private Sync: encryption unlocked.", 8000);
+              this.display();
+            } catch (error) {
+              new Notice(`Private Sync unlock failed: ${errorMessage(error)}`, 10000);
+            } finally {
+              button.setDisabled(false);
+              button.setButtonText("Unlock");
+            }
+          })
+      )
+      .then((setting) => {
+        const input = setting.controlEl.querySelector("input");
+        if (input) input.type = "password";
+      });
   }
 
   private async loadVaultOptions(dropdown: DropdownComponent): Promise<void> {

@@ -96,9 +96,20 @@ export class PrivateSyncView extends ItemView {
     this.row(list, "Last applied revision", String(index.lastAppliedRevision));
     this.row(list, "Indexed files", String(files.length));
     this.row(list, "Pending operations", String(index.queue.length));
+    this.row(
+      list,
+      "Encryption",
+      this.plugin.settings.encryptionEnabled
+        ? this.plugin.isEncryptionUnlocked()
+          ? "enabled and unlocked"
+          : "enabled and locked"
+        : this.plugin.settings.encryptionKeyCheck
+          ? "configured but disabled"
+          : "disabled"
+    );
     const vault = formatVaultLabel(this.plugin.settings.vaultName, this.plugin.settings.vaultId);
     this.row(list, "Server vault", this.plugin.settings.vaultLinked ? vault : `${vault} (not linked)`);
-    for (const status of ["synced", "pending_upload", "conflict", "locked_by_request", "ignored", "failed"] as const) {
+    for (const status of ["synced", "pending_upload", "pending_download", "conflict", "locked_by_request", "ignored", "failed"] as const) {
       const matchingFiles = files.filter((file) => file.status === status);
       if (status === "ignored") {
         this.ignoredStatusRow(list, matchingFiles);
@@ -636,7 +647,7 @@ export class PrivateSyncView extends ItemView {
     const details = row.createDiv();
     details.createDiv({ text: `Revision ${entry.vaultRevision}` });
     details.createDiv({
-      text: `${entry.deleted ? "deleted" : `${entry.size} B`} · ${entry.createdAt}`,
+      text: `${entry.deleted ? "deleted" : `${historyEntrySize(entry)} B${entry.encrypted ? " · encrypted" : ""}`} · ${entry.createdAt}`,
       cls: "private-sync-muted"
     });
     const actions = row.createDiv({ cls: "private-sync-actions" });
@@ -674,7 +685,7 @@ export class PrivateSyncView extends ItemView {
     try {
       const path = conflict.path;
       const local = decodeText(await readLocalBinary(this.plugin, path).catch(() => new ArrayBuffer(0)));
-      const server = decodeText(await this.plugin.api.download(this.plugin.settings.vaultId, path));
+      const server = decodeText(await this.plugin.syncEngine.downloadCurrentFilePlain(path));
       new ConflictDiffModal(this.plugin, `Diff: ${path}`, local, server, async (mergedText) => {
         await this.plugin.syncEngine.resolveLocalConflictWithText(path, mergedText, conflict.remote?.id);
         this.selectedConflictKeys.delete(conflict.key);
@@ -687,7 +698,7 @@ export class PrivateSyncView extends ItemView {
 
   private async previewRevision(entry: FileHistoryEntry): Promise<void> {
     try {
-      const content = decodeText(await this.plugin.api.downloadRevision(this.plugin.settings.vaultId, entry.id));
+      const content = decodeText(await this.plugin.syncEngine.downloadHistoryEntryPlain(entry));
       new TextPreviewModal(this.plugin, `Revision ${entry.vaultRevision}: ${this.historyPath}`, content).open();
     } catch (error) {
       new Notice(`Private Sync preview failed: ${errorMessage(error)}`, 10000);
@@ -721,6 +732,10 @@ function label(tab: Tab): string {
 
 function formatVaultLabel(name: string, id: string): string {
   return name ? `${name} (${id})` : id;
+}
+
+function historyEntrySize(entry: FileHistoryEntry): number {
+  return entry.encrypted ? entry.plaintextSize ?? entry.size : entry.size;
 }
 
 class VaultRenameModal extends Modal {

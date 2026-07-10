@@ -1,6 +1,6 @@
 import { Notice, TFile, normalizePath } from "obsidian";
 import { ApiClient } from "./apiClient";
-import { sha256, uuid } from "./crypto";
+import { decryptBytes, encryptBytes, sha256, uuid } from "./crypto";
 import { chunkSizeBytes, shouldAutoSyncPath, shouldUseChunkedTransfer } from "./filePolicy";
 import { getLocalFileStat, listLocalCommunityPluginIds, listLocalSyncFiles, readLocalBinary, trashLocalPath, type LocalSyncFile, writeLocalBinary } from "./localFiles";
 import type { LocalIndexStore } from "./localIndex";
@@ -15,7 +15,7 @@ type RemoteSnapshot = {
   latestRevision: number;
 };
 
-type ApplyServerChangeResult = "applied" | "queued_upload";
+type ApplyServerChangeResult = "applied" | "queued_upload" | "blocked";
 
 type LineChange = {
   baseStart: number;
@@ -73,6 +73,14 @@ export class SyncEngine {
       new Notice("Private Sync: choose and link a server vault before syncing.", 10000);
       return;
     }
+    if (this.plugin.settings.encryptionEnabled && !this.plugin.isEncryptionUnlocked()) {
+      new Notice("Private Sync: unlock encryption before syncing.", 10000);
+      await this.plugin.recordSyncEvent({
+        type: "error",
+        message: "Encryption is enabled but the passphrase is locked."
+      });
+      return;
+    }
     if (this.running) return;
     this.running = true;
     try {
@@ -106,8 +114,8 @@ export class SyncEngine {
       const stat = await getLocalFileStat(this.plugin, change.path);
       index.files[change.path] = {
         path: change.path,
-        localHash: change.deleted ? null : change.contentHash,
-        size: change.deleted ? 0 : change.size,
+        localHash: change.deleted ? null : remotePlaintextHash(change),
+        size: change.deleted ? 0 : remotePlaintextSize(change),
         mtime: stat?.mtime ?? Date.now(),
         serverRevisionId: change.fileRevisionId,
         status: "synced",
@@ -188,11 +196,12 @@ export class SyncEngine {
       const content = shouldUseChunkedTransfer(change.size, this.plugin.settings)
         ? await this.api.downloadChunked(this.plugin.settings.vaultId, change.path, change.size, chunkSizeBytes(this.plugin.settings))
         : await this.api.download(this.plugin.settings.vaultId, change.path);
-      await this.writeFile(change.path, content);
+      const plainContent = await this.decryptRemoteContent(change, content);
+      await this.writeFile(change.path, plainContent);
       index.files[change.path] = {
         path: change.path,
-        localHash: change.contentHash,
-        size: change.size,
+        localHash: remotePlaintextHash(change),
+        size: remotePlaintextSize(change),
         mtime: Date.now(),
         serverRevisionId: change.fileRevisionId,
         status: "synced",
@@ -222,7 +231,7 @@ export class SyncEngine {
       const content = await readLocalBinary(this.plugin, path);
       const localHash = await sha256(content);
       const remote = snapshot.files.get(path);
-      const isAlreadySynced = remote?.contentHash === localHash && remote.size === file.size;
+      const isAlreadySynced = remotePlaintextHash(remote) === localHash && remotePlaintextSize(remote) === file.size;
       index.files[path] = {
         path,
         localHash,
@@ -355,16 +364,21 @@ export class SyncEngine {
       const stat = await getLocalFileStat(this.plugin, operation.path);
       if (!stat) continue;
       const content = await readLocalBinary(this.plugin, operation.path);
-      const contentHash = await sha256(content);
+      const plaintextHash = await sha256(content);
+      const uploadContent = await this.prepareUploadContent(content);
+      const contentHash = await sha256(uploadContent);
       operation.contentHash = contentHash;
-      operation.size = content.byteLength;
+      operation.size = uploadContent.byteLength;
+      operation.encrypted = this.plugin.settings.encryptionEnabled;
+      operation.plaintextHash = this.plugin.settings.encryptionEnabled ? plaintextHash : undefined;
+      operation.plaintextSize = this.plugin.settings.encryptionEnabled ? content.byteLength : undefined;
       const record = index.files[operation.path];
       if (record) {
-        record.localHash = contentHash;
+        record.localHash = plaintextHash;
         record.size = stat.size;
         record.mtime = stat.mtime;
       }
-      uploadPayloads.set(operation.clientChangeId, content);
+      uploadPayloads.set(operation.clientChangeId, uploadContent);
       batchOperations.push(operation);
     }
     if (skippedOperationIds.length > 0) {
@@ -449,13 +463,25 @@ export class SyncEngine {
     let latestRevision = index.lastAppliedRevision;
     for (const change of [...response.changes].sort((left, right) => left.vaultRevision - right.vaultRevision)) {
       finalChangesByPath.set(change.path, change);
-      latestRevision = Math.max(latestRevision, change.vaultRevision);
     }
 
     let queuedUpload = false;
     for (const change of finalChangesByPath.values()) {
-      const result = await this.applyServerChange(change, localPluginIds);
+      const result = await this.applyServerChange(change, localPluginIds).catch(async (error) => {
+        const record = index.files[change.path];
+        if (record) record.status = "pending_download";
+        await this.plugin.recordSyncEvent({
+          type: "error",
+          path: change.path,
+          message: `Cannot apply remote change for ${change.path}: ${errorMessage(error)}`,
+          details: { encrypted: Boolean(change.encrypted), fileRevisionId: change.fileRevisionId }
+        });
+        new Notice(`Private Sync: cannot apply ${change.path}: ${errorMessage(error)}`, 10000);
+        return "blocked" as const;
+      });
+      if (result === "blocked") break;
       queuedUpload = queuedUpload || result === "queued_upload";
+      latestRevision = Math.max(latestRevision, change.vaultRevision);
     }
     index.lastAppliedRevision = latestRevision;
     await this.indexStore.save();
@@ -484,12 +510,12 @@ export class SyncEngine {
           wasSynced: true
         };
       } else {
-        const content = await this.api.download(this.plugin.settings.vaultId, path);
+        const content = await this.decryptRemoteContent(current, await this.api.download(this.plugin.settings.vaultId, path));
         await this.writeFile(path, content);
         index.files[path] = {
           path,
-          localHash: current.contentHash,
-          size: current.size,
+          localHash: remotePlaintextHash(current),
+          size: remotePlaintextSize(current),
           mtime: Date.now(),
           serverRevisionId: current.id,
           status: "synced",
@@ -588,6 +614,18 @@ export class SyncEngine {
     new Notice(`Private Sync: applied selected fragments for ${path}.`, 8000);
   }
 
+  async downloadCurrentFilePlain(path: string): Promise<ArrayBuffer> {
+    const history = await this.api.history(this.plugin.settings.vaultId, path);
+    const current = history.history[0];
+    if (!current || current.deleted) throw new Error("Server version is unavailable.");
+    return this.decryptRemoteContent(current, await this.api.download(this.plugin.settings.vaultId, path));
+  }
+
+  async downloadHistoryEntryPlain(entry: { id: number; encrypted: number | boolean; deleted?: number }): Promise<ArrayBuffer> {
+    if (entry.deleted) throw new Error("Deleted revisions cannot be downloaded.");
+    return this.downloadRevisionPlain(entry);
+  }
+
   private async applyServerChange(change: ServerChange, localPluginIds: Set<string>): Promise<ApplyServerChangeResult> {
     const index = this.indexStore.get();
     const record = index.files[change.path];
@@ -597,7 +635,7 @@ export class SyncEngine {
       if (record) {
         record.serverRevisionId = change.fileRevisionId;
         record.wasSynced = true;
-        record.status = record.localHash === change.contentHash ? "synced" : "dirty_local";
+        record.status = record.localHash === remotePlaintextHash(change) ? "synced" : "dirty_local";
       }
       return "applied";
     }
@@ -626,12 +664,12 @@ export class SyncEngine {
       };
       return "applied";
     }
-    const content = await this.api.downloadRevision(this.plugin.settings.vaultId, change.fileRevisionId);
+    const content = await this.decryptRemoteContent(change, await this.api.downloadRevision(this.plugin.settings.vaultId, change.fileRevisionId));
     await this.writeFile(change.path, content);
     index.files[change.path] = {
       path: change.path,
-      localHash: change.contentHash,
-      size: change.size,
+      localHash: remotePlaintextHash(change),
+      size: remotePlaintextSize(change),
       mtime: Date.now(),
       serverRevisionId: change.fileRevisionId,
       status: "synced",
@@ -655,10 +693,12 @@ export class SyncEngine {
       return "applied";
     }
 
+    const history = await this.api.history(this.plugin.settings.vaultId, change.path);
+    const baseRevision = history.history.find((entry) => entry.id === record.serverRevisionId);
     const [baseContent, localContent, remoteContent] = await Promise.all([
-      this.api.downloadRevision(this.plugin.settings.vaultId, record.serverRevisionId).catch(() => null),
+      baseRevision ? this.downloadRevisionPlain(baseRevision).catch(() => null) : Promise.resolve(null),
       readLocalBinary(this.plugin, change.path),
-      this.api.downloadRevision(this.plugin.settings.vaultId, change.fileRevisionId)
+      this.decryptRemoteContent(change, await this.api.downloadRevision(this.plugin.settings.vaultId, change.fileRevisionId))
     ]);
     if (!baseContent) {
       const currentRecord = index.files[change.path];
@@ -864,10 +904,11 @@ export class SyncEngine {
 
     if (!operation.baseRevisionId) return false;
 
+    const baseRevision = history.history.find((entry) => entry.id === operation.baseRevisionId);
     const [serverContent, localContent, baseContent] = await Promise.all([
-      this.api.download(this.plugin.settings.vaultId, operation.path),
+      this.decryptRemoteContent(current, await this.api.download(this.plugin.settings.vaultId, operation.path)),
       readLocalBinary(this.plugin, operation.path),
-      this.api.downloadRevision(this.plugin.settings.vaultId, operation.baseRevisionId).catch(() => null)
+      baseRevision ? this.downloadRevisionPlain(baseRevision).catch(() => null) : Promise.resolve(null)
     ]);
     if (!baseContent) return false;
 
@@ -890,7 +931,7 @@ export class SyncEngine {
       wasSynced: true
     };
     await this.indexStore.removePathFromQueue(operation.path);
-    if (mergedHash === current.contentHash) {
+    if (mergedHash === remotePlaintextHash(current)) {
       index.files[operation.path].status = "synced";
     } else {
       await this.indexStore.enqueue({
@@ -991,7 +1032,7 @@ export class SyncEngine {
     if (!stat) return;
     const content = await readLocalBinary(this.plugin, path);
     const localHash = await sha256(content);
-    if (localHash !== current.contentHash) return;
+    if (localHash !== remotePlaintextHash(current)) return;
     record.localHash = localHash;
     record.size = stat.size;
     record.mtime = stat.mtime;
@@ -1035,6 +1076,24 @@ export class SyncEngine {
       localFileCount: manifest.fileCount,
       localManifestHash: manifest.manifestHash
     });
+  }
+
+  private async prepareUploadContent(content: ArrayBuffer): Promise<ArrayBuffer> {
+    if (!this.plugin.settings.encryptionEnabled) return content;
+    return encryptBytes(content, this.plugin.requireEncryptionPassphrase());
+  }
+
+  private async decryptRemoteContent(
+    revision: { encrypted: number | boolean; path?: string; fileRevisionId?: number; id?: number },
+    content: ArrayBuffer
+  ): Promise<ArrayBuffer> {
+    if (!revision.encrypted) return content;
+    return decryptBytes(content, this.plugin.requireEncryptionPassphrase());
+  }
+
+  private async downloadRevisionPlain(revision: { id: number; encrypted: number | boolean }): Promise<ArrayBuffer> {
+    const content = await this.api.downloadRevision(this.plugin.settings.vaultId, revision.id);
+    return this.decryptRemoteContent(revision, content);
   }
 
   private async savePairedDevice(deviceId: string, deviceToken: string): Promise<void> {
@@ -1087,6 +1146,16 @@ function isSyncedDeletedRecord(record: { localHash: string | null; size: number;
 
 function isAutoMergeTextFile(file: TFile): boolean {
   return isTextLikePath(file.path);
+}
+
+function remotePlaintextHash(revision: { contentHash: string | null; encrypted: number | boolean; plaintextHash?: string | null } | undefined): string | null {
+  if (!revision) return null;
+  return revision.encrypted ? revision.plaintextHash ?? revision.contentHash : revision.contentHash;
+}
+
+function remotePlaintextSize(revision: { size: number; encrypted: number | boolean; plaintextSize?: number | null } | undefined): number {
+  if (!revision) return 0;
+  return revision.encrypted ? revision.plaintextSize ?? revision.size : revision.size;
 }
 
 function isTextLikePath(path: string): boolean {
@@ -1269,4 +1338,8 @@ function decodeUtf8(content: ArrayBuffer): string {
 
 function encodeUtf8(text: string): ArrayBuffer {
   return new TextEncoder().encode(text).buffer;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

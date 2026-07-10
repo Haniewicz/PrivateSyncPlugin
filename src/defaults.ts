@@ -18,7 +18,9 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   syncCommunityPlugins: true,
   maxAutoSyncFileSizeMb: 100,
   largeFileChunkSizeMb: 5,
-  largeFileThresholdMb: 10
+  largeFileThresholdMb: 10,
+  encryptionEnabled: false,
+  encryptionKeyCheck: ""
 };
 
 export const DEFAULT_INDEX: LocalIndex = {

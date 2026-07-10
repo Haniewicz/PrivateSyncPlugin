@@ -32,6 +32,10 @@ export type PendingOperation = {
   baseRevisionId: number | null;
   contentHash?: string;
   size?: number;
+  encrypted?: boolean;
+  encryptedFileKey?: string | null;
+  plaintextHash?: string;
+  plaintextSize?: number;
   detectedAt: string;
 };
 
@@ -69,6 +73,8 @@ export type PluginSettings = {
   maxAutoSyncFileSizeMb: number;
   largeFileChunkSizeMb: number;
   largeFileThresholdMb: number;
+  encryptionEnabled: boolean;
+  encryptionKeyCheck: string;
 };
 
 export type ServerVault = {
@@ -105,6 +111,8 @@ export type ServerChange = {
   path: string;
   contentHash: string | null;
   size: number;
+  plaintextHash?: string | null;
+  plaintextSize?: number | null;
   deleted: number;
   encrypted: number;
   deviceId?: string;
@@ -163,6 +171,8 @@ export type FileHistoryEntry = {
   vaultRevision: number;
   contentHash: string | null;
   size: number;
+  plaintextHash?: string | null;
+  plaintextSize?: number | null;
   deleted: number;
   encrypted: number;
   deviceId: string;

@@ -1,6 +1,6 @@
-import { Notice, Plugin, setIcon, TFile, WorkspaceLeaf } from "obsidian";
+import { Editor, Notice, Plugin, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import { ApiClient } from "./apiClient";
-import { uuid } from "./crypto";
+import { createEncryptionKeyCheck, decryptTextFragment, encryptTextFragment, uuid, verifyEncryptionKeyCheck } from "./crypto";
 import { DEFAULT_INDEX, DEFAULT_SETTINGS } from "./defaults";
 import { LocalIndexStore } from "./localIndex";
 import { PairingApprovalModal, parseDevicePairingPayload } from "./pairingApprovalModal";
@@ -24,6 +24,7 @@ export default class PrivateSyncPlugin extends Plugin {
   private socket: WebSocket | null = null;
   private reconnectTimeout: number | null = null;
   private statusBarItem: HTMLElement | null = null;
+  private encryptionPassphrase = "";
   private offlineNoticeShown = false;
   private activePairingRequestModals = new Set<string>();
   private unloading = false;
@@ -60,6 +61,16 @@ export default class PrivateSyncPlugin extends Plugin {
       id: "private-sync-check-pairing-requests",
       name: "Check pairing requests",
       callback: () => this.checkPairingRequests()
+    });
+    this.addCommand({
+      id: "private-sync-encrypt-selection",
+      name: "Encrypt selected text",
+      editorCallback: (editor) => this.encryptEditorSelection(editor)
+    });
+    this.addCommand({
+      id: "private-sync-decrypt-selection",
+      name: "Decrypt selected encrypted text",
+      editorCallback: (editor) => this.decryptEditorSelection(editor)
     });
 
     this.registerEvent(
@@ -104,6 +115,40 @@ export default class PrivateSyncPlugin extends Plugin {
   async saveSettings(): Promise<void> {
     this.recreateApi();
     await this.savePluginData({ settings: this.settings });
+  }
+
+  isEncryptionUnlocked(): boolean {
+    return Boolean(this.encryptionPassphrase);
+  }
+
+  requireEncryptionPassphrase(): string {
+    if (!this.settings.encryptionKeyCheck) throw new Error("Set an encryption passphrase in Private Sync settings first.");
+    if (!this.encryptionPassphrase) throw new Error("Unlock the Private Sync encryption passphrase first.");
+    return this.encryptionPassphrase;
+  }
+
+  async setEncryptionPassphrase(passphrase: string): Promise<void> {
+    const trimmed = passphrase.trim();
+    if (!trimmed) throw new Error("Encryption passphrase cannot be empty.");
+    this.settings.encryptionKeyCheck = await createEncryptionKeyCheck(trimmed);
+    this.encryptionPassphrase = trimmed;
+    await this.saveSettings();
+    this.refreshView();
+  }
+
+  async unlockEncryption(passphrase: string): Promise<void> {
+    const trimmed = passphrase.trim();
+    if (!this.settings.encryptionKeyCheck) throw new Error("Set an encryption passphrase first.");
+    if (!(await verifyEncryptionKeyCheck(this.settings.encryptionKeyCheck, trimmed))) {
+      throw new Error("Encryption passphrase is incorrect.");
+    }
+    this.encryptionPassphrase = trimmed;
+    this.refreshView();
+  }
+
+  lockEncryption(): void {
+    this.encryptionPassphrase = "";
+    this.refreshView();
   }
 
   async savePluginData(partial: StoredData): Promise<void> {
@@ -341,6 +386,30 @@ export default class PrivateSyncPlugin extends Plugin {
     return true;
   }
 
+  private async encryptEditorSelection(editor: Editor): Promise<void> {
+    try {
+      const selected = editor.getSelection();
+      if (!selected) throw new Error("Select text to encrypt first.");
+      const marker = await encryptTextFragment(selected, this.requireEncryptionPassphrase());
+      editor.replaceSelection(marker);
+      new Notice("Private Sync: encrypted selected text.", 5000);
+    } catch (error) {
+      new Notice(`Private Sync encryption failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
+  private async decryptEditorSelection(editor: Editor): Promise<void> {
+    try {
+      const target = findEncryptedMarker(editor);
+      if (!target) throw new Error("Select an encrypted marker or place the cursor inside one.");
+      const text = await decryptTextFragment(target.text, this.requireEncryptionPassphrase());
+      editor.replaceRange(text, target.from, target.to);
+      new Notice("Private Sync: decrypted selected text.", 5000);
+    } catch (error) {
+      new Notice(`Private Sync decryption failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
   private updateConnectionStatus(): void {
     if (!this.statusBarItem) return;
     this.statusBarItem.empty();
@@ -382,4 +451,30 @@ function parseServerEvent(data: unknown): { type?: string; vault_id?: string; na
   } catch {
     return {};
   }
+}
+
+function findEncryptedMarker(editor: Editor): { text: string; from: { line: number; ch: number }; to: { line: number; ch: number } } | null {
+  const selection = editor.getSelection();
+  if (selection.trim()) {
+    const from = editor.getCursor("from");
+    const to = editor.getCursor("to");
+    return { text: selection, from, to };
+  }
+
+  const cursor = editor.getCursor();
+  const text = editor.getValue();
+  const offset = editor.posToOffset(cursor);
+  const pattern = /%%private-sync-encrypted:v1:[A-Za-z0-9_-]+%%/g;
+  for (const match of text.matchAll(pattern)) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    if (offset >= start && offset <= end) {
+      return {
+        text: match[0],
+        from: editor.offsetToPos(start),
+        to: editor.offsetToPos(end)
+      };
+    }
+  }
+  return null;
 }
