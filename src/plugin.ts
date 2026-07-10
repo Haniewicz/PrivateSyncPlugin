@@ -3,6 +3,7 @@ import { ApiClient } from "./apiClient";
 import { createEncryptionKeyCheck, decryptTextFragment, encryptTextFragment, uuid, verifyEncryptionKeyCheck } from "./crypto";
 import { DEFAULT_INDEX, DEFAULT_SETTINGS } from "./defaults";
 import { LocalIndexStore } from "./localIndex";
+import { decryptNoteBodyText, encryptNoteBodyText, hasAutoEncryptProperty, isEncryptedNoteBody, setAutoEncryptProperty } from "./noteEncryption";
 import { PairingApprovalModal, parseDevicePairingPayload } from "./pairingApprovalModal";
 import { PrivateSyncSettingTab } from "./settingsTab";
 import { SyncEngine } from "./syncEngine";
@@ -71,6 +72,26 @@ export default class PrivateSyncPlugin extends Plugin {
       id: "private-sync-decrypt-selection",
       name: "Decrypt selected encrypted text",
       editorCallback: (editor) => this.decryptEditorSelection(editor)
+    });
+    this.addCommand({
+      id: "private-sync-encrypt-note-body",
+      name: "Encrypt current note body",
+      editorCallback: (editor) => this.encryptCurrentNoteBody(editor, false)
+    });
+    this.addCommand({
+      id: "private-sync-decrypt-note-body",
+      name: "Decrypt current note body",
+      editorCallback: (editor) => this.decryptCurrentNoteBody(editor)
+    });
+    this.addCommand({
+      id: "private-sync-enable-note-auto-encryption",
+      name: "Enable auto-encryption for current note",
+      editorCallback: (editor) => this.encryptCurrentNoteBody(editor, true)
+    });
+    this.addCommand({
+      id: "private-sync-disable-note-auto-encryption",
+      name: "Disable auto-encryption for current note",
+      editorCallback: (editor) => this.disableCurrentNoteAutoEncryption(editor)
     });
 
     this.registerEvent(
@@ -149,6 +170,19 @@ export default class PrivateSyncPlugin extends Plugin {
   lockEncryption(): void {
     this.encryptionPassphrase = "";
     this.refreshView();
+  }
+
+  async encryptMarkedNotesBeforeSync(): Promise<void> {
+    const files = this.app.vault.getMarkdownFiles();
+    let encrypted = 0;
+    for (const file of files) {
+      const text = await this.app.vault.read(file);
+      if (!hasAutoEncryptProperty(text) || isEncryptedNoteBody(text)) continue;
+      const nextText = await encryptNoteBodyText(text, this.requireEncryptionPassphrase());
+      await this.app.vault.modify(file, nextText);
+      encrypted += 1;
+    }
+    if (encrypted > 0) new Notice(`Private Sync: encrypted ${encrypted} marked note${encrypted === 1 ? "" : "s"}.`, 5000);
   }
 
   async savePluginData(partial: StoredData): Promise<void> {
@@ -407,6 +441,36 @@ export default class PrivateSyncPlugin extends Plugin {
       new Notice("Private Sync: decrypted selected text.", 5000);
     } catch (error) {
       new Notice(`Private Sync decryption failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
+  private async encryptCurrentNoteBody(editor: Editor, enableAutoEncryption: boolean): Promise<void> {
+    try {
+      const text = enableAutoEncryption ? setAutoEncryptProperty(editor.getValue(), true) : editor.getValue();
+      const encrypted = await encryptNoteBodyText(text, this.requireEncryptionPassphrase());
+      editor.setValue(encrypted);
+      new Notice(enableAutoEncryption ? "Private Sync: note body encrypted and marked for auto-encryption." : "Private Sync: note body encrypted.", 5000);
+    } catch (error) {
+      new Notice(`Private Sync note encryption failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
+  private async decryptCurrentNoteBody(editor: Editor): Promise<void> {
+    try {
+      const decrypted = await decryptNoteBodyText(editor.getValue(), this.requireEncryptionPassphrase());
+      editor.setValue(decrypted);
+      new Notice("Private Sync: note body decrypted.", 5000);
+    } catch (error) {
+      new Notice(`Private Sync note decryption failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
+  private disableCurrentNoteAutoEncryption(editor: Editor): void {
+    try {
+      editor.setValue(setAutoEncryptProperty(editor.getValue(), false));
+      new Notice("Private Sync: note auto-encryption disabled.", 5000);
+    } catch (error) {
+      new Notice(`Private Sync: cannot disable note auto-encryption: ${errorMessage(error)}`, 10000);
     }
   }
 

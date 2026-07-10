@@ -84,6 +84,7 @@ export class SyncEngine {
     if (this.running) return;
     this.running = true;
     try {
+      await this.plugin.encryptMarkedNotesBeforeSync();
       await this.scanLocalChanges();
       await this.pushQueue();
       await this.pullChanges();
