@@ -108,11 +108,11 @@ export class ConflictDiffModal extends Modal {
       controls.createSpan({ text: "Use for this fragment", cls: "private-sync-conflict-choice-label" });
       const local = controls.createEl("button", {
         text: "Local",
-        cls: "private-sync-button private-sync-button-subtle private-sync-conflict-choice"
+        cls: "private-sync-button private-sync-conflict-choice private-sync-conflict-choice-local"
       });
       const server = controls.createEl("button", {
         text: "Server",
-        cls: "private-sync-button private-sync-button-subtle private-sync-conflict-choice"
+        cls: "private-sync-button private-sync-conflict-choice private-sync-conflict-choice-server"
       });
       local.onclick = () => this.chooseHunk(hunk.index, "local", local, server);
       server.onclick = () => this.chooseHunk(hunk.index, "server", local, server);

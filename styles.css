@@ -240,25 +240,49 @@
 }
 
 .private-sync-conflict-choice-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(88px, auto) minmax(88px, auto);
   align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  padding: 6px 8px;
+  gap: 8px;
+  padding: 8px;
   border-top: 1px solid var(--background-modifier-border);
   background: var(--background-secondary);
 }
 
 .private-sync-conflict-choice-label {
-  margin-right: auto;
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-.private-sync-conflict-choice.is-selected {
-  border-color: var(--interactive-accent);
-  background: var(--interactive-accent);
+.private-sync-conflict-choice {
+  min-width: 88px;
+  justify-self: stretch;
+  white-space: nowrap;
+}
+
+.private-sync-conflict-choice-local {
+  border-color: rgba(214, 76, 76, 0.55);
+  background: rgba(214, 76, 76, 0.12);
+  color: var(--text-error, var(--color-red));
+}
+
+.private-sync-conflict-choice-server {
+  border-color: rgba(60, 132, 112, 0.55);
+  background: rgba(60, 132, 112, 0.14);
+  color: var(--text-success, var(--color-green));
+}
+
+.private-sync-conflict-choice-local.is-selected {
+  border-color: var(--text-error, var(--color-red));
+  background: var(--text-error, var(--color-red));
+  color: var(--text-on-accent);
+}
+
+.private-sync-conflict-choice-server.is-selected {
+  border-color: var(--text-success, var(--color-green));
+  background: var(--text-success, var(--color-green));
   color: var(--text-on-accent);
 }
 
@@ -368,7 +392,14 @@
     border-bottom: 0;
   }
 
-  .private-sync-conflict-choice-actions,
+  .private-sync-conflict-choice-actions {
+    grid-template-columns: minmax(0, 1fr) minmax(80px, 1fr) minmax(80px, 1fr);
+  }
+
+  .private-sync-conflict-choice-label {
+    grid-column: 1 / -1;
+  }
+
   .private-sync-conflict-merge-actions {
     justify-content: flex-start;
   }
@@ -388,7 +419,14 @@
     border-bottom: 0;
   }
 
-  .private-sync-conflict-choice-actions,
+  .private-sync-conflict-choice-actions {
+    grid-template-columns: minmax(0, 1fr) minmax(80px, 1fr) minmax(80px, 1fr);
+  }
+
+  .private-sync-conflict-choice-label {
+    grid-column: 1 / -1;
+  }
+
   .private-sync-conflict-merge-actions {
     justify-content: flex-start;
   }
