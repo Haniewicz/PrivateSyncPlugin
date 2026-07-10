@@ -161,6 +161,47 @@
   text-align: right;
 }
 
+.private-sync-storage-list {
+  min-width: 0;
+}
+
+.private-sync-storage-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 2px 2px;
+  min-width: 0;
+}
+
+.private-sync-storage-vault-row {
+  grid-template-columns: minmax(0, 1fr) minmax(180px, auto);
+}
+
+.private-sync-storage-vault-row > :first-child,
+.private-sync-storage-values {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.private-sync-storage-values {
+  display: grid;
+  gap: 2px;
+  justify-items: end;
+  text-align: right;
+}
+
+@container (max-width: 520px) {
+  .private-sync-storage-vault-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .private-sync-storage-values {
+    justify-items: start;
+    text-align: left;
+  }
+}
+
 .private-sync-ignored-list {
   display: grid;
   gap: 4px;

@@ -10,12 +10,14 @@ import type {
   RemoteDevice,
   ServerConflict,
   ServerRequest,
+  ServerStorageUsage,
+  StorageCleanupTarget,
   SyncEvent
 } from "./types";
 
 export const PRIVATE_SYNC_VIEW = "private-sync-view";
 
-type Tab = "status" | "devices" | "requests" | "conflicts" | "history" | "events";
+type Tab = "status" | "devices" | "requests" | "conflicts" | "history" | "events" | "storage";
 
 type ConflictListItem = {
   key: string;
@@ -65,7 +67,7 @@ export class PrivateSyncView extends ItemView {
     this.actionButton(toolbar, "Pair", "primary").onclick = () => this.plugin.syncEngine.pairDevice();
 
     const tabs = root.createDiv({ cls: "private-sync-tabs" });
-    for (const tab of ["status", "devices", "requests", "conflicts", "history", "events"] as Tab[]) {
+    for (const tab of ["status", "devices", "requests", "conflicts", "history", "events", "storage"] as Tab[]) {
       const button = tabs.createEl("button", { text: label(tab), cls: "private-sync-tab" });
       if (tab === this.activeTab) button.addClass("is-active");
       button.onclick = () => {
@@ -80,6 +82,7 @@ export class PrivateSyncView extends ItemView {
     if (this.activeTab === "conflicts") this.renderConflicts(root);
     if (this.activeTab === "history") this.renderHistory(root);
     if (this.activeTab === "events") this.renderEvents(root);
+    if (this.activeTab === "storage") this.renderStorage(root);
   }
 
   private renderStatus(root: Element): void {
@@ -254,6 +257,89 @@ export class PrivateSyncView extends ItemView {
       const actions = row.createDiv({ cls: "private-sync-actions" });
       actions.createDiv({ text: event.timestamp, cls: "private-sync-muted private-sync-event-time" });
       this.actionButton(actions, "Details", "subtle").onclick = () => this.showEventDetails(event);
+    }
+  }
+
+  private renderStorage(root: Element): void {
+    const toolbar = root.createDiv({ cls: "private-sync-toolbar" });
+    toolbar.createDiv({ text: "Server storage", cls: "private-sync-muted private-sync-event-count" });
+    this.actionButton(toolbar, "Refresh", "subtle").onclick = () => this.render();
+
+    const list = root.createDiv({ cls: "private-sync-list private-sync-storage-list" });
+    if (!this.plugin.settings.deviceToken) {
+      this.row(list, "Status", "not paired");
+      return;
+    }
+    this.plugin.api
+      .storageUsage()
+      .then((usage) => this.renderStorageUsage(list, usage))
+      .catch((error) => {
+        list.empty();
+        this.row(list, "Error", errorMessage(error));
+      });
+    this.row(list, "Loading", "storage usage");
+  }
+
+  private renderStorageUsage(list: Element, usage: ServerStorageUsage): void {
+    list.empty();
+    this.row(list, "Total data", `${formatBytes(usage.totals.diskBytes)} on disk · ${formatBytes(usage.totals.bytes)} logical`);
+    this.row(list, "Data directory", usage.totals.dataDir);
+    this.row(list, "Blobs", formatSizeInfo(usage.totals.blobs));
+    this.row(list, "Database", formatSizeInfo(usage.totals.database));
+    this.row(
+      list,
+      "Staging",
+      `${formatSizeInfo(usage.totals.staging)} · ${usage.totals.staging.directories} dirs · ${usage.totals.staging.files} files · ${usage.totals.staging.staleDirectories} stale`
+    );
+    this.row(list, "npm cache", usage.totals.npmCache.exists ? formatSizeInfo(usage.totals.npmCache) : "not present");
+
+    const cleanupTargets = usage.cleanup.safeTargets.filter((target) => target.available);
+    const cleanupRow = list.createDiv({ cls: "private-sync-row private-sync-action-row" });
+    const cleanupDetails = cleanupRow.createDiv();
+    cleanupDetails.createDiv({ text: "Safe cleanup" });
+    cleanupDetails.createDiv({
+      text: cleanupTargets.length === 0 ? "No removable safe data detected." : cleanupTargets.map((target) => `${target.label}: ${formatBytes(target.bytes)}`).join(" · "),
+      cls: "private-sync-muted"
+    });
+    const cleanupActions = cleanupRow.createDiv({ cls: "private-sync-actions" });
+    for (const target of usage.cleanup.safeTargets) {
+      const button = this.actionButton(cleanupActions, `Clean ${target.label}`, "danger");
+      button.disabled = !target.available;
+      button.onclick = () => this.cleanupStorage([target.target], button);
+    }
+    const cleanAll = this.actionButton(cleanupActions, "Clean all safe", "danger");
+    cleanAll.disabled = cleanupTargets.length === 0;
+    cleanAll.onclick = () => this.cleanupStorage(cleanupTargets.map((target) => target.target), cleanAll);
+
+    const vaultHeader = list.createDiv({ cls: "private-sync-storage-heading" });
+    vaultHeader.createDiv({ text: "Vaults" });
+    vaultHeader.createDiv({ text: `${usage.vaults.length} vaults`, cls: "private-sync-muted" });
+    for (const vault of usage.vaults) {
+      const row = list.createDiv({ cls: "private-sync-row private-sync-storage-vault-row" });
+      const details = row.createDiv();
+      details.createDiv({ text: vault.name });
+      details.createDiv({ text: `${vault.id} · revision ${vault.currentRevision}`, cls: "private-sync-muted" });
+      const values = row.createDiv({ cls: "private-sync-storage-values" });
+      values.createDiv({ text: `Live: ${formatBytes(vault.liveBytes)} / ${vault.liveFiles} files` });
+      values.createDiv({ text: `History: ${formatBytes(vault.historyBytes)} / ${vault.revisions} revisions`, cls: "private-sync-muted" });
+      values.createDiv({ text: `Unique blobs: ${formatBytes(vault.uniqueBlobBytes)} · deleted rows: ${vault.deletedFiles}`, cls: "private-sync-muted" });
+    }
+  }
+
+  private async cleanupStorage(targets: StorageCleanupTarget[], button: HTMLButtonElement): Promise<void> {
+    if (targets.length === 0) return;
+    const previousText = button.textContent ?? "Clean";
+    button.disabled = true;
+    button.textContent = "Cleaning...";
+    try {
+      const result = await this.plugin.api.cleanupStorage(targets);
+      const removed = result.cleaned.reduce((sum, item) => sum + item.removedBytes, 0);
+      new Notice(`Private Sync: cleaned ${formatBytes(removed)}.`, 8000);
+      this.render();
+    } catch (error) {
+      new Notice(`Private Sync cleanup failed: ${errorMessage(error)}`, 10000);
+      button.disabled = false;
+      button.textContent = previousText;
     }
   }
 
@@ -595,6 +681,24 @@ function eventDetailsPretty(event: SyncEvent): string {
     null,
     2
   );
+}
+
+function formatSizeInfo(size: { bytes: number; diskBytes: number }): string {
+  if (size.diskBytes === size.bytes) return formatBytes(size.bytes);
+  return `${formatBytes(size.diskBytes)} on disk · ${formatBytes(size.bytes)} logical`;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const precision = value >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${value.toFixed(precision)} ${units[unitIndex]}`;
 }
 
 function requestLabel(type: string): string {

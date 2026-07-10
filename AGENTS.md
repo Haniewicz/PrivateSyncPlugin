@@ -39,3 +39,10 @@ Check at minimum:
 - README discloses network use, account/server requirements, and external file access.
 - dependencies are minimal and lockfile is committed.
 - `npm run build` passes.
+
+## Plugin UI policy
+
+- Keep plugin UI in one consistent visual style; reuse the existing view, row, toolbar, tab, and button classes before adding new patterns.
+- Every new menu/view element must fit inside the available Obsidian pane or modal width.
+- Use `min-width: 0`, wrapping, responsive grids, and existing compact row layouts for long paths, device names, vault IDs, and action groups.
+- Before release, inspect new UI for overflow, clipped controls, and text that escapes rows or buttons.

@@ -165,3 +165,59 @@ export type FileHistoryEntry = {
   deviceId: string;
   createdAt: string;
 };
+
+export type StorageCleanupTarget = "stale_staging" | "npm_cache";
+
+export type ServerSizeInfo = {
+  bytes: number;
+  diskBytes: number;
+};
+
+export type ServerStorageUsage = {
+  generatedAt: string;
+  totals: ServerSizeInfo & {
+    dataDir: string;
+    blobs: ServerSizeInfo;
+    staging: ServerSizeInfo & {
+      directories: number;
+      files: number;
+      staleDirectories: number;
+    };
+    database: ServerSizeInfo;
+    npmCache: ServerSizeInfo & {
+      exists: boolean;
+    };
+  };
+  vaults: Array<{
+    id: string;
+    name: string;
+    currentRevision: number;
+    revisions: number;
+    filesEver: number;
+    liveFiles: number;
+    deletedFiles: number;
+    historyBytes: number;
+    liveBytes: number;
+    uniqueBlobBytes: number;
+  }>;
+  cleanup: {
+    safeTargets: Array<{
+      target: StorageCleanupTarget;
+      label: string;
+      description: string;
+      bytes: number;
+      count: number;
+      available: boolean;
+    }>;
+  };
+};
+
+export type ServerStorageCleanupResult = {
+  ok: true;
+  cleaned: Array<{
+    target: StorageCleanupTarget;
+    removedBytes: number;
+    removedCount: number;
+  }>;
+  usage: ServerStorageUsage;
+};

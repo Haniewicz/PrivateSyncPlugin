@@ -7,7 +7,10 @@ import type {
   ServerChange,
   ServerConflict,
   ServerRequest,
+  ServerStorageCleanupResult,
+  ServerStorageUsage,
   ServerVault,
+  StorageCleanupTarget,
   VaultConnectionAssessment
 } from "./types";
 
@@ -211,6 +214,14 @@ export class ApiClient {
 
   async restoreRevision(vaultId: string, revisionId: number): Promise<{ ok: true; revision: number; path: string }> {
     return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/files/revisions/${encodeURIComponent(String(revisionId))}/restore`, {});
+  }
+
+  async storageUsage(): Promise<ServerStorageUsage> {
+    return this.get("/api/v1/storage/usage");
+  }
+
+  async cleanupStorage(targets: StorageCleanupTarget[]): Promise<ServerStorageCleanupResult> {
+    return this.post("/api/v1/storage/cleanup", { targets });
   }
 
   private async get<T>(path: string): Promise<T> {
