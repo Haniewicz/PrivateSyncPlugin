@@ -21,8 +21,8 @@ Skopiuj `manifest.json`, `main.js` i `styles.css` do folderu pluginu w vaultcie 
 - batch upload do serwera,
 - pobieranie zmian od `last_applied_revision`,
 - wybór albo tworzenie server-vaulta przed trwałym powiązaniem lokalnego vaulta,
-- opcjonalna synchronizacja wybranych ustawień Obsidiana i katalogów community pluginów,
-- widok boczny: Status, Urządzenia, Konflikty, Historia.
+- opcjonalna synchronizacja wybranych ustawień Obsidiana oraz katalogu community pluginów z ich ustawieniami JSON,
+- widok boczny: Status, Urządzenia, Vaults, Plugins, Konflikty, Historia.
 
 Na tym etapie lokalny indeks używa trwałego storage Obsidiana. SQLite warto dodać jako kolejny krok dla dużych vaultów.
 
@@ -32,7 +32,9 @@ Przy pierwszym powiązaniu plugin liczy lokalny manifest plików i pyta serwer o
 
 Synchronizacja ustawień Obsidiana jest włączona domyślnie i może zostać wyłączona w ustawieniach pluginu. Plugin synchronizuje tylko ustawienia kreatorów notatek: daily notes, templates, unique note creator i Zettelkasten prefixer. Dzięki temu przenoszone są m.in. formaty nazw nowych notatek oraz ścieżki template i folderów docelowych. Nie synchronizuje workspace ani całego katalogu konfiguracji w ciemno.
 
-Synchronizacja community pluginów jest osobnym przełącznikiem pod ustawieniami Obsidiana. Jeśli plugin o tym samym ID istnieje lokalnie i zdalnie, Private Sync nie porównuje jego hashy ani wersji i pomija cały katalog tego pluginu. Pluginy brakujące po jednej stronie mogą zostać pobrane albo wysłane.
+Synchronizacja community pluginów jest osobnym przełącznikiem pod ustawieniami Obsidiana. Private Sync nie kopiuje kodu pluginów (`main.js`, `styles.css`) ani nie instaluje ich automatycznie. Każde urządzenie skanuje lokalne community pluginy, dopisuje ich ID, nazwę i wersję do katalogu na serwerze oraz wysyła JSON-owe pliki ustawień z folderu danego pluginu, z pominięciem `manifest.json`.
+
+W widoku `Plugins` użytkownik widzi pluginy wykryte na innych urządzeniach. Brakujący plugin można otworzyć w oficjalnym installerze Obsidiana, a po jego instalacji kliknąć `Apply settings`, żeby wgrać zapisane ustawienia do odpowiedniego folderu `.obsidian/plugins/<plugin-id>/`.
 
 ## Duże pliki i załączniki
 

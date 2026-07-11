@@ -11,7 +11,7 @@ export function shouldSyncPath(path: string, settings: PluginSettings, configDir
 
   const relativePath = normalizedPath.slice(normalizedConfigDir.length + 1);
   const pluginId = communityPluginIdFromRelativePath(relativePath);
-  if (pluginId) return settings.syncCommunityPlugins;
+  if (pluginId) return false;
   if (relativePath.includes("/")) return false;
   return NOTE_CREATOR_SETTING_FILES.has(relativePath);
 }

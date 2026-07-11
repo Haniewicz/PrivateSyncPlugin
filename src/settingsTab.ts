@@ -154,7 +154,7 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Sync community plugins")
-      .setDesc("Synchronizes community plugin folders only when a plugin with the same ID is missing on the other side.")
+      .setDesc("Shares a catalog of installed community plugins and JSON settings files. Plugin code is installed from Obsidian, then settings can be applied from Private Sync.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.syncCommunityPlugins).setDisabled(!this.plugin.settings.syncObsidianSettings).onChange(async (value) => {
           this.plugin.settings.syncCommunityPlugins = value;

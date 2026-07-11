@@ -1,5 +1,6 @@
 import { requestUrl, type RequestUrlParam, type RequestUrlResponse } from "obsidian";
 import type {
+  CommunityPluginCatalogEntry,
   DeviceType,
   FileHistoryEntry,
   PendingOperation,
@@ -61,6 +62,18 @@ export class ApiClient {
 
   async deleteVault(vaultId: string): Promise<{ ok: true }> {
     return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/delete`, {});
+  }
+
+  async getCommunityPlugins(vaultId: string): Promise<{ plugins: CommunityPluginCatalogEntry[] }> {
+    return this.get(`/api/v1/vaults/${encodeURIComponent(vaultId)}/community-plugins`);
+  }
+
+  async updateCommunityPlugins(vaultId: string, plugins: CommunityPluginCatalogEntry[]): Promise<{ ok: true; plugins: CommunityPluginCatalogEntry[] }> {
+    return this.request(`/api/v1/vaults/${encodeURIComponent(vaultId)}/community-plugins`, {
+      method: "PUT",
+      contentType: "application/json",
+      body: JSON.stringify({ plugins })
+    }).then((response) => response.json as { ok: true; plugins: CommunityPluginCatalogEntry[] });
   }
 
   async getEncryptionKeys(vaultId: string): Promise<{ active: VaultEncryptionKey | null; keys: VaultEncryptionKey[] }> {

@@ -88,6 +88,27 @@ export type ServerVault = {
   encryptionKeyCheck?: string | null;
 };
 
+export type CommunityPluginSetting = {
+  relativePath: string;
+  contentBase64: string;
+  contentHash: string;
+  size: number;
+  sourceDeviceId?: string | null;
+  updatedAt?: string;
+};
+
+export type CommunityPluginCatalogEntry = {
+  id: string;
+  name?: string | null;
+  version?: string | null;
+  author?: string | null;
+  description?: string | null;
+  sourceDeviceId?: string | null;
+  firstSeenAt?: string;
+  updatedAt?: string;
+  settings: CommunityPluginSetting[];
+};
+
 export type VaultEncryptionKey = {
   id: string;
   keyCheck: string;

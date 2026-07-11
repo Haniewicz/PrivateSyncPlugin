@@ -1,6 +1,6 @@
 import { ItemView, Modal, Notice, WorkspaceLeaf } from "obsidian";
 import { verifyEncryptionKeyCheck } from "./crypto";
-import { readLocalBinary } from "./localFiles";
+import { listLocalCommunityPluginIds, readLocalBinary } from "./localFiles";
 import { parseDevicePairingPayload } from "./pairingApprovalModal";
 import { ConflictDiffModal, decodeText, TextPreviewModal } from "./textPreviewModal";
 import type PrivateSyncPlugin from "./plugin";
@@ -10,6 +10,7 @@ import type {
   LocalFileRecord,
   RemoteDevice,
   ServerConflict,
+  CommunityPluginCatalogEntry,
   ServerRequest,
   ServerStorageUsage,
   ServerVault,
@@ -19,7 +20,7 @@ import type {
 
 export const PRIVATE_SYNC_VIEW = "private-sync-view";
 
-type Tab = "status" | "devices" | "vaults" | "requests" | "conflicts" | "history" | "events" | "storage";
+type Tab = "status" | "devices" | "vaults" | "plugins" | "requests" | "conflicts" | "history" | "events" | "storage";
 
 type ConflictListItem = {
   key: string;
@@ -69,7 +70,7 @@ export class PrivateSyncView extends ItemView {
     this.actionButton(toolbar, "Pair", "primary").onclick = () => this.plugin.syncEngine.pairDevice();
 
     const tabs = root.createDiv({ cls: "private-sync-tabs" });
-    for (const tab of ["status", "devices", "vaults", "requests", "conflicts", "history", "events", "storage"] as Tab[]) {
+    for (const tab of ["status", "devices", "vaults", "plugins", "requests", "conflicts", "history", "events", "storage"] as Tab[]) {
       const button = tabs.createEl("button", { text: label(tab), cls: "private-sync-tab" });
       if (tab === this.activeTab) button.addClass("is-active");
       button.onclick = () => {
@@ -81,6 +82,7 @@ export class PrivateSyncView extends ItemView {
     if (this.activeTab === "status") this.renderStatus(root);
     if (this.activeTab === "devices") this.renderRemoteList(root, "devices");
     if (this.activeTab === "vaults") this.renderVaults(root);
+    if (this.activeTab === "plugins") this.renderCommunityPlugins(root);
     if (this.activeTab === "requests") this.renderRequests(root);
     if (this.activeTab === "conflicts") this.renderConflicts(root);
     if (this.activeTab === "history") this.renderHistory(root);
@@ -163,6 +165,46 @@ export class PrivateSyncView extends ItemView {
         this.row(list, "Error", errorMessage(error));
       });
     this.row(list, "Loading", "vaults");
+  }
+
+  private renderCommunityPlugins(root: Element): void {
+    const toolbar = root.createDiv({ cls: "private-sync-toolbar" });
+    toolbar.createDiv({ text: "Community plugins", cls: "private-sync-muted private-sync-event-count" });
+    const scan = this.actionButton(toolbar, "Scan local", "primary");
+    scan.onclick = async () => {
+      scan.disabled = true;
+      scan.textContent = "Scanning...";
+      try {
+        await this.plugin.syncEngine.syncCommunityPluginCatalog();
+        new Notice("Private Sync: community plugin catalog updated.", 8000);
+        this.render();
+      } catch (error) {
+        new Notice(`Private Sync plugin scan failed: ${errorMessage(error)}`, 10000);
+        scan.disabled = false;
+        scan.textContent = "Scan local";
+      }
+    };
+    this.actionButton(toolbar, "Refresh", "subtle").onclick = () => this.render();
+
+    const list = root.createDiv({ cls: "private-sync-list" });
+    if (!this.plugin.settings.deviceToken || !this.plugin.settings.vaultLinked) {
+      this.row(list, "Status", "not linked");
+      return;
+    }
+    Promise.all([this.plugin.api.getCommunityPlugins(this.plugin.settings.vaultId), listLocalCommunityPluginIds(this.plugin)])
+      .then(([response, localIds]) => {
+        list.empty();
+        if (response.plugins.length === 0) {
+          this.row(list, "Status", "no plugins in server catalog");
+          return;
+        }
+        for (const entry of response.plugins) this.communityPluginRow(list, entry, localIds);
+      })
+      .catch((error) => {
+        list.empty();
+        this.row(list, "Error", errorMessage(error));
+      });
+    this.row(list, "Loading", "plugins");
   }
 
   private renderConflicts(root: Element): void {
@@ -555,6 +597,42 @@ export class PrivateSyncView extends ItemView {
         return;
       }
       this.confirmDeleteVault(vault);
+    };
+  }
+
+  private communityPluginRow(parent: Element, entry: CommunityPluginCatalogEntry, localIds: Set<string>): void {
+    const installed = localIds.has(entry.id);
+    const row = parent.createDiv({ cls: "private-sync-row private-sync-action-row" });
+    const details = row.createDiv();
+    details.createDiv({ text: entry.name || entry.id });
+    details.createDiv({
+      text: `${entry.id}${entry.version ? ` · ${entry.version}` : ""} · ${installed ? "installed locally" : "missing locally"} · ${entry.settings.length} setting files`,
+      cls: "private-sync-muted"
+    });
+    const actions = row.createDiv({ cls: "private-sync-actions" });
+    const install = this.actionButton(actions, installed ? "Open" : "Install", "info");
+    install.onclick = () => {
+      window.open(`obsidian://show-plugin?id=${encodeURIComponent(entry.id)}`);
+    };
+    const apply = this.actionButton(actions, "Apply settings", "success");
+    apply.disabled = !installed || entry.settings.length === 0;
+    apply.title = !installed
+      ? "Install the plugin first, then apply settings."
+      : entry.settings.length === 0
+        ? "No settings files were found for this plugin."
+        : "";
+    apply.onclick = async () => {
+      apply.disabled = true;
+      apply.textContent = "Applying...";
+      try {
+        const count = await this.plugin.syncEngine.applyRemoteCommunityPluginSettings(entry.id);
+        new Notice(`Private Sync: applied ${count} setting file${count === 1 ? "" : "s"} for ${entry.name || entry.id}.`, 8000);
+        this.render();
+      } catch (error) {
+        new Notice(`Private Sync plugin settings failed: ${errorMessage(error)}`, 10000);
+        apply.disabled = false;
+        apply.textContent = "Apply settings";
+      }
     };
   }
 

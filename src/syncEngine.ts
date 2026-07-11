@@ -2,7 +2,17 @@ import { Notice, TFile, normalizePath } from "obsidian";
 import { ApiClient } from "./apiClient";
 import { decryptBytes, encryptBytes, isEncryptedPayload, sha256, uuid } from "./crypto";
 import { chunkSizeBytes, shouldAutoSyncPath, shouldUseChunkedTransfer } from "./filePolicy";
-import { getLocalFileStat, listLocalCommunityPluginIds, listLocalSyncFiles, readLocalBinary, trashLocalPath, type LocalSyncFile, writeLocalBinary } from "./localFiles";
+import {
+  applyCommunityPluginSettings,
+  getLocalFileStat,
+  listLocalCommunityPluginIds,
+  listLocalSyncFiles,
+  readLocalBinary,
+  scanLocalCommunityPlugins,
+  trashLocalPath,
+  type LocalSyncFile,
+  writeLocalBinary
+} from "./localFiles";
 import type { LocalIndexStore } from "./localIndex";
 import { encryptedPlaceholderInfo, encryptedPlaceholderText, isEncryptedNoteBody, isEncryptedPlaceholder, isMarkedForServerEncryption } from "./noteEncryption";
 import type PrivateSyncPlugin from "./plugin";
@@ -92,6 +102,7 @@ export class SyncEngine {
         await this.pullChanges();
         await this.downloadPendingEncryptedPlaceholders();
         await this.reconcileResolvedLocalConflicts();
+        await this.syncCommunityPluginCatalog();
         await this.recordSyncStateIfComplete();
         this.plugin.refreshView();
       } while (this.runAgain);
@@ -177,6 +188,29 @@ export class SyncEngine {
       return;
     }
     new Notice("Private Sync: paired, but vault linking was cancelled.", 10000);
+  }
+
+  async syncCommunityPluginCatalog(): Promise<void> {
+    if (!this.plugin.settings.deviceToken || !this.plugin.settings.vaultLinked) return;
+    if (!this.plugin.settings.syncObsidianSettings || !this.plugin.settings.syncCommunityPlugins) return;
+    const plugins = await scanLocalCommunityPlugins(this.plugin);
+    await this.api.updateCommunityPlugins(this.plugin.settings.vaultId, plugins);
+  }
+
+  async applyRemoteCommunityPluginSettings(pluginId: string): Promise<number> {
+    if (this.plugin.handleOfflineSyncAttempt()) return 0;
+    const response = await this.api.getCommunityPlugins(this.plugin.settings.vaultId);
+    const entry = response.plugins.find((plugin) => plugin.id === pluginId);
+    if (!entry) throw new Error(`No server settings found for ${pluginId}.`);
+    const applied = await applyCommunityPluginSettings(this.plugin, pluginId, entry.settings);
+    await this.syncCommunityPluginCatalog();
+    await this.plugin.recordSyncEvent({
+      type: "manual_resolution",
+      message: `Applied settings for ${pluginId}`,
+      details: { pluginId, files: applied }
+    });
+    this.plugin.refreshView();
+    return applied;
   }
 
   async replaceLocalWithRemote(): Promise<void> {

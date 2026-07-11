@@ -1,7 +1,9 @@
 import { normalizePath, TFile, TFolder } from "obsidian";
+import { sha256 } from "./crypto";
 import { shouldAutoSyncPath } from "./filePolicy";
 import type PrivateSyncPlugin from "./plugin";
 import { shouldSyncPath } from "./settingsSyncPolicy";
+import type { CommunityPluginCatalogEntry, CommunityPluginSetting } from "./types";
 
 export type LocalSyncFile = {
   path: string;
@@ -91,6 +93,54 @@ export async function listLocalCommunityPluginIds(plugin: PrivateSyncPlugin): Pr
   return ids;
 }
 
+export async function scanLocalCommunityPlugins(plugin: PrivateSyncPlugin): Promise<CommunityPluginCatalogEntry[]> {
+  const pluginsPath = normalizePath(`${plugin.app.vault.configDir}/plugins`);
+  if (!(await plugin.app.vault.adapter.exists(pluginsPath))) return [];
+  const listed = await plugin.app.vault.adapter.list(pluginsPath);
+  const plugins: CommunityPluginCatalogEntry[] = [];
+  for (const folder of listed.folders) {
+    const pluginFolder = normalizePath(folder);
+    const pluginId = pluginFolder.split("/").pop();
+    if (!pluginId) continue;
+    const manifest = await readPluginManifest(plugin, pluginFolder, pluginId);
+    plugins.push({
+      id: manifest.id || pluginId,
+      name: manifest.name || pluginId,
+      version: manifest.version || null,
+      author: manifest.author || null,
+      description: manifest.description || null,
+      settings: await scanPluginSettings(plugin, pluginFolder)
+    });
+  }
+  plugins.sort((left, right) => left.id.localeCompare(right.id));
+  return plugins;
+}
+
+export async function applyCommunityPluginSettings(
+  plugin: PrivateSyncPlugin,
+  pluginId: string,
+  settings: CommunityPluginSetting[]
+): Promise<number> {
+  const pluginFolder = normalizePath(`${plugin.app.vault.configDir}/plugins/${pluginId}`);
+  if (!(await plugin.app.vault.adapter.exists(pluginFolder))) {
+    throw new Error(`Install ${pluginId} before applying its settings.`);
+  }
+  let applied = 0;
+  for (const setting of settings) {
+    if (!isPluginSettingPath(setting.relativePath)) continue;
+    const content = base64ToArrayBuffer(setting.contentBase64);
+    if ((await sha256(content)) !== setting.contentHash.toLowerCase()) {
+      throw new Error(`Setting hash mismatch for ${pluginId}/${setting.relativePath}.`);
+    }
+    const path = normalizePath(`${pluginFolder}/${setting.relativePath}`);
+    const parent = path.split("/").slice(0, -1).join("/");
+    if (parent) await ensureAdapterFolder(plugin, parent);
+    await plugin.app.vault.adapter.writeBinary(path, content);
+    applied += 1;
+  }
+  return applied;
+}
+
 async function listConfigFiles(plugin: PrivateSyncPlugin): Promise<LocalSyncFile[]> {
   const configDir = normalizePath(plugin.app.vault.configDir);
   if (!(await plugin.app.vault.adapter.exists(configDir))) return [];
@@ -150,7 +200,75 @@ function isConfigPath(plugin: PrivateSyncPlugin, path: string): boolean {
 function shouldExploreConfigFolder(path: string, configDir: string, syncCommunityPlugins: boolean): boolean {
   const relativePath = path.slice(configDir.length + 1);
   if (!relativePath) return true;
-  if (relativePath === "plugins") return syncCommunityPlugins;
-  if (relativePath.startsWith("plugins/")) return syncCommunityPlugins;
+  if (relativePath === "plugins") return false;
+  if (relativePath.startsWith("plugins/")) return false;
   return false;
+}
+
+async function readPluginManifest(
+  plugin: PrivateSyncPlugin,
+  pluginFolder: string,
+  fallbackId: string
+): Promise<{ id: string; name?: string; version?: string; author?: string; description?: string }> {
+  try {
+    const raw = await plugin.app.vault.adapter.read(normalizePath(`${pluginFolder}/manifest.json`));
+    const parsed = JSON.parse(raw) as { id?: unknown; name?: unknown; version?: unknown; author?: unknown; description?: unknown };
+    return {
+      id: typeof parsed.id === "string" && parsed.id.trim() ? parsed.id.trim() : fallbackId,
+      name: typeof parsed.name === "string" ? parsed.name : undefined,
+      version: typeof parsed.version === "string" ? parsed.version : undefined,
+      author: typeof parsed.author === "string" ? parsed.author : undefined,
+      description: typeof parsed.description === "string" ? parsed.description : undefined
+    };
+  } catch {
+    return { id: fallbackId, name: fallbackId };
+  }
+}
+
+async function scanPluginSettings(plugin: PrivateSyncPlugin, pluginFolder: string): Promise<CommunityPluginSetting[]> {
+  const settings: CommunityPluginSetting[] = [];
+  const visit = async (folder: string): Promise<void> => {
+    const listed = await plugin.app.vault.adapter.list(folder);
+    for (const filePath of listed.files) {
+      const normalizedPath = normalizePath(filePath);
+      const relativePath = normalizedPath.slice(pluginFolder.length + 1);
+      if (!isPluginSettingPath(relativePath)) continue;
+      const stat = await plugin.app.vault.adapter.stat(normalizedPath);
+      if (!stat || stat.type !== "file" || stat.size > 1024 * 1024) continue;
+      const content = await plugin.app.vault.adapter.readBinary(normalizedPath);
+      settings.push({
+        relativePath,
+        contentBase64: arrayBufferToBase64(content),
+        contentHash: await sha256(content),
+        size: content.byteLength
+      });
+    }
+    for (const folderPath of listed.folders) await visit(normalizePath(folderPath));
+  };
+  await visit(pluginFolder);
+  settings.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  return settings;
+}
+
+function isPluginSettingPath(relativePath: string): boolean {
+  const normalizedPath = normalizePath(relativePath);
+  if (!normalizedPath || normalizedPath.startsWith("/") || normalizedPath.includes("..")) return false;
+  if (!normalizedPath.toLowerCase().endsWith(".json")) return false;
+  return normalizedPath !== "manifest.json";
+}
+
+function arrayBufferToBase64(content: ArrayBuffer): string {
+  const bytes = new Uint8Array(content);
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.slice(index, index + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function base64ToArrayBuffer(value: string): ArrayBuffer {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes.buffer;
 }
