@@ -258,6 +258,7 @@ export default class PrivateSyncPlugin extends Plugin {
       await this.saveSettings();
       return key.id;
     }
+    if (!active.id) throw new Error("Server returned an active encryption key without an id. Re-pair or update Private Sync before uploading encrypted files.");
     if (!(await verifyEncryptionKeyCheck(active.keyCheck, passphrase))) throw new Error("Encryption passphrase does not match this server vault.");
     this.settings.encryptionKeyCheck = active.keyCheck;
     this.settings.encryptionKeyId = active.id;
