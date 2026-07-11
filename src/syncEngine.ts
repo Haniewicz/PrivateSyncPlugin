@@ -29,6 +29,10 @@ type ThreeWayMergeResult = {
   hasConflicts: boolean;
 };
 
+type ConflictResolutionOptions = {
+  notify?: boolean;
+};
+
 export class SyncEngine {
   private running = false;
   private runAgain = false;
@@ -371,6 +375,10 @@ export class SyncEngine {
     const uploadPayloads = new Map<string, ArrayBuffer>();
     const batchOperations: PendingOperation[] = [];
     for (const operation of index.queue) {
+      const queuedRecord = index.files[operation.path];
+      if (queuedRecord?.status === "conflict" || queuedRecord?.status === "locked_by_request") {
+        continue;
+      }
       if (!shouldSyncPath(operation.path, this.plugin.settings, this.plugin.app.vault.configDir)) {
         skippedOperationIds.push(operation.clientChangeId);
         continue;
@@ -520,7 +528,12 @@ export class SyncEngine {
     if (queuedUpload) await this.pushQueue();
   }
 
-  async resolveLocalConflict(path: string, strategy: "keep_local" | "use_server", conflictId?: string): Promise<void> {
+  async resolveLocalConflict(
+    path: string,
+    strategy: "keep_local" | "use_server",
+    conflictId?: string,
+    options: ConflictResolutionOptions = {}
+  ): Promise<void> {
     if (this.plugin.handleOfflineSyncAttempt()) return;
     const index = this.indexStore.get();
     const record = index.files[path];
@@ -563,7 +576,7 @@ export class SyncEngine {
         message: `Used server version for ${path}`,
         details: { strategy, conflictId }
       });
-      new Notice(`Private Sync: using server version for ${path}.`, 8000);
+      if (options.notify !== false) new Notice(`Private Sync: using server version for ${path}.`, 8000);
       this.plugin.refreshView();
       return;
     }
@@ -600,7 +613,7 @@ export class SyncEngine {
       details: { strategy, conflictId }
     });
     this.plugin.refreshView();
-    new Notice(`Private Sync: kept local version for ${path}.`, 8000);
+    if (options.notify !== false) new Notice(`Private Sync: kept local version for ${path}.`, 8000);
   }
 
   async resolveLocalConflictWithText(path: string, mergedText: string, conflictId?: string): Promise<void> {
@@ -644,6 +657,40 @@ export class SyncEngine {
     });
     this.plugin.refreshView();
     new Notice(`Private Sync: applied selected fragments for ${path}.`, 8000);
+  }
+
+  async dismissConflict(path: string, conflictId?: string): Promise<void> {
+    if (this.plugin.handleOfflineSyncAttempt()) return;
+    await this.resolveRemoteConflicts(path, "resolved", { strategy: "dismiss_conflict" }, conflictId);
+    await this.indexStore.removePathFromQueue(path);
+    const index = this.indexStore.get();
+    const record = index.files[path];
+    if (record && (record.status === "conflict" || record.status === "locked_by_request")) {
+      const history = await this.api.history(this.plugin.settings.vaultId, path);
+      const current = history.history[0];
+      const stat = await getLocalFileStat(this.plugin, path);
+      if (stat) {
+        const content = await readLocalBinary(this.plugin, path);
+        record.localHash = await sha256(content);
+        record.size = stat.size;
+        record.mtime = stat.mtime;
+      } else {
+        record.localHash = null;
+        record.size = 0;
+        record.mtime = Date.now();
+      }
+      record.serverRevisionId = current?.id ?? record.serverRevisionId;
+      record.status = "synced";
+      record.wasSynced = record.wasSynced || Boolean(current);
+      await this.indexStore.save();
+    }
+    await this.plugin.recordSyncEvent({
+      type: "manual_resolution",
+      path,
+      message: `Dismissed conflict for ${path}`,
+      details: { strategy: "dismiss_conflict", conflictId }
+    });
+    this.plugin.refreshView();
   }
 
   async downloadCurrentFilePlain(path: string): Promise<ArrayBuffer> {
@@ -731,6 +778,9 @@ export class SyncEngine {
       const path = normalizePath(file.path);
       const content = await readLocalBinary(this.plugin, path);
       if (!this.shouldEncryptUpload(path, content)) continue;
+      const history = await this.api.history(this.plugin.settings.vaultId, path);
+      const current = history.history[0];
+      if (!current?.encrypted) continue;
       const localHash = await sha256(content);
       const record = index.files[path] ?? {
         path,
@@ -1149,7 +1199,12 @@ export class SyncEngine {
         serverRevisionId: current.id
       }
     });
-    new Notice(`Private Sync: auto-merged conflict in ${operation.path}.`, 10000);
+    this.plugin.showAggregatedNotice(
+      "conflicts-resolved",
+      `Private Sync: auto-merged conflict in ${operation.path}.`,
+      (count) => `Private Sync: ${count} conflicts resolved.`,
+      10000
+    );
     await this.reconcileResolvedLocalConflict(operation.path);
     return true;
   }
@@ -1183,7 +1238,12 @@ export class SyncEngine {
         serverRevisionId: current.id
       }
     });
-    new Notice(`Private Sync: resolved delete conflict in ${operation.path}.`, 10000);
+    this.plugin.showAggregatedNotice(
+      "conflicts-resolved",
+      `Private Sync: resolved delete conflict in ${operation.path}.`,
+      (count) => `Private Sync: ${count} conflicts resolved.`,
+      10000
+    );
     await this.reconcileResolvedLocalConflict(operation.path);
     return true;
   }

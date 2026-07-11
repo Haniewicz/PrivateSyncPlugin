@@ -16,6 +16,14 @@ type StoredData = {
   events?: SyncEvent[];
 };
 
+type AggregatedNotice = {
+  count: number;
+  message: string;
+  timeout: number;
+  aggregateMessage: (count: number) => string;
+  timer: number;
+};
+
 const ENCRYPTION_SECRET_ID = "private-sync-encryption-passphrase";
 
 export default class PrivateSyncPlugin extends Plugin {
@@ -32,6 +40,7 @@ export default class PrivateSyncPlugin extends Plugin {
   private offlineNoticeShown = false;
   private activePairingRequestModals = new Set<string>();
   private unloading = false;
+  private aggregatedNotices = new Map<string, AggregatedNotice>();
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -150,6 +159,12 @@ export default class PrivateSyncPlugin extends Plugin {
     if (!this.settings.encryptionKeyCheck) throw new Error("Set an encryption passphrase in Private Sync settings first.");
     if (!this.encryptionPassphrase) throw new Error("Unlock the Private Sync encryption passphrase first.");
     return this.encryptionPassphrase;
+  }
+
+  getLocalEncryptionPassphrase(): string | null {
+    if (this.encryptionPassphrase) return this.encryptionPassphrase;
+    if (!this.settings.rememberEncryptionPassphrase) return null;
+    return this.app.secretStorage.getSecret(ENCRYPTION_SECRET_ID) || null;
   }
 
   async setEncryptionPassphrase(passphrase: string, currentPassphrase = ""): Promise<void> {
@@ -317,6 +332,41 @@ export default class PrivateSyncPlugin extends Plugin {
       message: `${message}: ${errorMessage(error)}`,
       details: errorDetails(error)
     });
+  }
+
+  showAggregatedNotice(
+    key: string,
+    message: string,
+    aggregateMessage: (count: number) => string,
+    timeout = 8000,
+    delay = 750
+  ): void {
+    const existing = this.aggregatedNotices.get(key);
+    if (existing) {
+      window.clearTimeout(existing.timer);
+      existing.count += 1;
+      existing.message = message;
+      existing.timeout = timeout;
+      existing.aggregateMessage = aggregateMessage;
+      existing.timer = window.setTimeout(() => this.flushAggregatedNotice(key), delay);
+      return;
+    }
+
+    const notice: AggregatedNotice = {
+      count: 1,
+      message,
+      timeout,
+      aggregateMessage,
+      timer: window.setTimeout(() => this.flushAggregatedNotice(key), delay)
+    };
+    this.aggregatedNotices.set(key, notice);
+  }
+
+  private flushAggregatedNotice(key: string): void {
+    const notice = this.aggregatedNotices.get(key);
+    if (!notice) return;
+    this.aggregatedNotices.delete(key);
+    new Notice(notice.count === 1 ? notice.message : notice.aggregateMessage(notice.count), notice.timeout);
   }
 
   async clearSyncEvents(predicate?: (event: SyncEvent) => boolean): Promise<void> {

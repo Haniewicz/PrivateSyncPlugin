@@ -459,6 +459,9 @@ export class PrivateSyncView extends ItemView {
     const useServer = this.actionButton(toolbar, "Use server", "info");
     useServer.disabled = this.selectedConflictKeys.size === 0;
     useServer.onclick = () => this.resolveSelectedConflicts(conflicts, "use_server");
+    const dismiss = this.actionButton(toolbar, "Dismiss", "danger");
+    dismiss.disabled = this.selectedConflictKeys.size === 0;
+    dismiss.onclick = () => this.dismissSelectedConflicts(conflicts);
   }
 
   private requestRow(parent: Element, request: ServerRequest, payload: DevicePairingRequestPayload): void {
@@ -605,6 +608,7 @@ export class PrivateSyncView extends ItemView {
     keepLocal.disabled = !conflict.local;
     keepLocal.onclick = () => this.resolveConflict(conflict, "keep_local");
     this.actionButton(actions, "Use server", "info").onclick = () => this.resolveConflict(conflict, "use_server");
+    this.actionButton(actions, "Dismiss", "danger").onclick = () => this.dismissConflict(conflict);
   }
 
   private async resolveConflict(conflict: ConflictListItem, strategy: "keep_local" | "use_server"): Promise<void> {
@@ -628,7 +632,7 @@ export class PrivateSyncView extends ItemView {
         continue;
       }
       try {
-        await this.plugin.syncEngine.resolveLocalConflict(conflict.path, strategy, conflict.remote?.id);
+        await this.plugin.syncEngine.resolveLocalConflict(conflict.path, strategy, conflict.remote?.id, { notify: false });
         this.selectedConflictKeys.delete(conflict.key);
         succeeded += 1;
       } catch (error) {
@@ -639,6 +643,39 @@ export class PrivateSyncView extends ItemView {
       new Notice(`Private Sync: resolved ${succeeded}/${selected.length} conflicts. Failed: ${failed.slice(0, 3).join("; ")}`, 15000);
     } else {
       new Notice(`Private Sync: resolved ${succeeded} conflicts.`, 8000);
+    }
+    this.render();
+  }
+
+  private async dismissConflict(conflict: ConflictListItem): Promise<void> {
+    try {
+      await this.plugin.syncEngine.dismissConflict(conflict.path, conflict.remote?.id);
+      this.selectedConflictKeys.delete(conflict.key);
+      new Notice(`Private Sync: dismissed conflict for ${conflict.path}.`, 8000);
+      this.render();
+    } catch (error) {
+      new Notice(`Private Sync conflict dismiss failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
+  private async dismissSelectedConflicts(conflicts: ConflictListItem[]): Promise<void> {
+    const selected = conflicts.filter((conflict) => this.selectedConflictKeys.has(conflict.key));
+    if (selected.length === 0) return;
+    let succeeded = 0;
+    const failed: string[] = [];
+    for (const conflict of selected) {
+      try {
+        await this.plugin.syncEngine.dismissConflict(conflict.path, conflict.remote?.id);
+        this.selectedConflictKeys.delete(conflict.key);
+        succeeded += 1;
+      } catch (error) {
+        failed.push(`${conflict.path}: ${errorMessage(error)}`);
+      }
+    }
+    if (failed.length > 0) {
+      new Notice(`Private Sync: dismissed ${succeeded}/${selected.length} conflicts. Failed: ${failed.slice(0, 3).join("; ")}`, 15000);
+    } else {
+      new Notice(`Private Sync: dismissed ${succeeded} conflicts.`, 8000);
     }
     this.render();
   }
@@ -712,7 +749,7 @@ export class PrivateSyncView extends ItemView {
   private async restoreRevision(entry: FileHistoryEntry): Promise<void> {
     try {
       if (entry.encrypted && this.isOlderEncryptedHistoryEntry(entry)) {
-        const passphrase = await this.promptHistoryPassphrase(entry);
+        const passphrase = await this.historyPassphraseForEntry(entry);
         if (!passphrase) return;
         await this.plugin.syncEngine.restoreHistoryEntryToLocalWithPassphrase(this.historyPath, entry, passphrase);
         new Notice(`Private Sync: restored revision ${entry.vaultRevision} locally and uploaded with the active encryption key.`, 10000);
@@ -746,6 +783,14 @@ export class PrivateSyncView extends ItemView {
         if (!entry.encrypted) throw error;
       }
     }
+    const localPassphrase = this.plugin.getLocalEncryptionPassphrase();
+    if (localPassphrase) {
+      try {
+        return await this.plugin.syncEngine.downloadHistoryEntryPlainWithPassphrase(entry, localPassphrase);
+      } catch (error) {
+        // Fall through to one-time passphrase prompt for older revisions.
+      }
+    }
     const passphrase = await this.promptHistoryPassphrase(entry);
     if (!passphrase) throw new Error("Passphrase was not entered.");
     return this.plugin.syncEngine.downloadHistoryEntryPlainWithPassphrase(entry, passphrase);
@@ -764,6 +809,19 @@ export class PrivateSyncView extends ItemView {
         : "This older encrypted revision has no key metadata. Enter the passphrase that was used when it was uploaded.",
       keyCheck: key?.keyCheck ?? null
     });
+  }
+
+  private async historyPassphraseForEntry(entry: FileHistoryEntry): Promise<string | null> {
+    const localPassphrase = this.plugin.getLocalEncryptionPassphrase();
+    if (localPassphrase) {
+      try {
+        await this.plugin.syncEngine.downloadHistoryEntryPlainWithPassphrase(entry, localPassphrase);
+        return localPassphrase;
+      } catch (error) {
+        // Fall through to one-time passphrase prompt for older revisions.
+      }
+    }
+    return this.promptHistoryPassphrase(entry);
   }
 
   private showEventDetails(event: SyncEvent): void {
