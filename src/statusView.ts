@@ -1,6 +1,6 @@
-import { ItemView, Modal, Notice, WorkspaceLeaf } from "obsidian";
+import { ItemView, Modal, normalizePath, Notice, WorkspaceLeaf } from "obsidian";
 import { verifyEncryptionKeyCheck } from "./crypto";
-import { listLocalCommunityPluginIds, readLocalBinary } from "./localFiles";
+import { isManagedCommunityPluginId, listLocalCommunityPluginIds, readLocalBinary } from "./localFiles";
 import { parseDevicePairingPayload } from "./pairingApprovalModal";
 import { ConflictDiffModal, decodeText, TextPreviewModal } from "./textPreviewModal";
 import type PrivateSyncPlugin from "./plugin";
@@ -27,6 +27,14 @@ type ConflictListItem = {
   path: string;
   local?: LocalFileRecord;
   remote?: ServerConflict;
+};
+
+type ObsidianCommunityPluginManager = {
+  enabledPlugins?: Set<string> | string[];
+  plugins?: Record<string, unknown>;
+  enablePlugin?: (pluginId: string) => Promise<void>;
+  disablePlugin?: (pluginId: string) => Promise<void>;
+  uninstallPlugin?: (pluginId: string) => Promise<void>;
 };
 
 export class PrivateSyncView extends ItemView {
@@ -194,11 +202,12 @@ export class PrivateSyncView extends ItemView {
     Promise.all([this.plugin.api.getCommunityPlugins(this.plugin.settings.vaultId), listLocalCommunityPluginIds(this.plugin)])
       .then(([response, localIds]) => {
         list.empty();
-        if (response.plugins.length === 0) {
+        const plugins = response.plugins.filter((entry) => isManagedCommunityPluginId(entry.id));
+        if (plugins.length === 0) {
           this.row(list, "Status", "no plugins in server catalog");
           return;
         }
-        for (const entry of response.plugins) this.communityPluginRow(list, entry, localIds);
+        for (const entry of plugins) this.communityPluginRow(list, entry, localIds);
       })
       .catch((error) => {
         list.empty();
@@ -602,19 +611,27 @@ export class PrivateSyncView extends ItemView {
 
   private communityPluginRow(parent: Element, entry: CommunityPluginCatalogEntry, localIds: Set<string>): void {
     const installed = localIds.has(entry.id);
+    const enabled = installed && this.isCommunityPluginEnabled(entry.id);
     const row = parent.createDiv({ cls: "private-sync-row private-sync-action-row" });
     const details = row.createDiv();
     details.createDiv({ text: entry.name || entry.id });
     details.createDiv({
-      text: `${entry.id}${entry.version ? ` · ${entry.version}` : ""} · ${installed ? "installed locally" : "missing locally"} · ${entry.settings.length} setting files`,
+      text: `${entry.id}${entry.version ? ` · ${entry.version}` : ""} · ${installed ? (enabled ? "enabled locally" : "disabled locally") : "missing locally"} · ${entry.settings.length} setting files`,
       cls: "private-sync-muted"
     });
     const actions = row.createDiv({ cls: "private-sync-actions" });
-    const install = this.actionButton(actions, installed ? "Open" : "Install", "info");
-    install.onclick = () => {
-      window.open(`obsidian://show-plugin?id=${encodeURIComponent(entry.id)}`);
-    };
-    const apply = this.actionButton(actions, "Apply settings", "success");
+    if (installed) {
+      const toggle = this.actionButton(actions, enabled ? "Disable" : "Enable", enabled ? "subtle" : "info");
+      toggle.onclick = () => this.toggleCommunityPlugin(entry.id, !enabled);
+      const uninstall = this.actionButton(actions, "Uninstall", "danger");
+      uninstall.onclick = () => this.uninstallCommunityPlugin(entry);
+    } else {
+      const open = this.actionButton(actions, "Open", "info");
+      open.onclick = () => {
+        window.open(`obsidian://show-plugin?id=${encodeURIComponent(entry.id)}`);
+      };
+    }
+    const apply = this.actionButton(actions, "Apply Server Settings", "success");
     apply.disabled = !installed || entry.settings.length === 0;
     apply.title = !installed
       ? "Install the plugin first, then apply settings."
@@ -631,9 +648,54 @@ export class PrivateSyncView extends ItemView {
       } catch (error) {
         new Notice(`Private Sync plugin settings failed: ${errorMessage(error)}`, 10000);
         apply.disabled = false;
-        apply.textContent = "Apply settings";
+        apply.textContent = "Apply Server Settings";
       }
     };
+  }
+
+  private isCommunityPluginEnabled(pluginId: string): boolean {
+    const manager = this.communityPluginManager();
+    const enabledPlugins = manager.enabledPlugins;
+    if (Array.isArray(enabledPlugins)) return enabledPlugins.includes(pluginId);
+    if (enabledPlugins) return enabledPlugins.has(pluginId);
+    return Boolean(manager.plugins?.[pluginId]);
+  }
+
+  private async toggleCommunityPlugin(pluginId: string, enabled: boolean): Promise<void> {
+    try {
+      const manager = this.communityPluginManager();
+      const action = enabled ? manager.enablePlugin : manager.disablePlugin;
+      if (typeof action !== "function") throw new Error("This Obsidian version does not expose plugin enable/disable controls.");
+      await action.call(manager, pluginId);
+      new Notice(`Private Sync: ${enabled ? "enabled" : "disabled"} ${pluginId}.`, 8000);
+      this.render();
+    } catch (error) {
+      new Notice(`Private Sync plugin toggle failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
+  private async uninstallCommunityPlugin(entry: CommunityPluginCatalogEntry): Promise<void> {
+    try {
+      const pluginId = entry.id;
+      const manager = this.communityPluginManager();
+      if (this.isCommunityPluginEnabled(pluginId) && typeof manager.disablePlugin === "function") {
+        await manager.disablePlugin.call(manager, pluginId);
+      }
+      const uninstallPlugin = manager.uninstallPlugin;
+      if (typeof uninstallPlugin === "function") {
+        await uninstallPlugin.call(manager, pluginId);
+      } else {
+        await this.plugin.app.vault.adapter.rmdir(normalizePath(`${this.plugin.app.vault.configDir}/plugins/${pluginId}`), true);
+      }
+      new Notice(`Private Sync: uninstalled ${entry.name || pluginId}.`, 8000);
+      this.render();
+    } catch (error) {
+      new Notice(`Private Sync plugin uninstall failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
+  private communityPluginManager(): ObsidianCommunityPluginManager {
+    return (this.plugin.app as unknown as { plugins?: ObsidianCommunityPluginManager }).plugins ?? {};
   }
 
   private updateCurrentVaultName(vaults: ServerVault[]): void {

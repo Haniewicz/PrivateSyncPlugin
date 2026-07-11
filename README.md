@@ -34,7 +34,7 @@ Synchronizacja ustawień Obsidiana jest włączona domyślnie i może zostać wy
 
 Synchronizacja community pluginów jest osobnym przełącznikiem pod ustawieniami Obsidiana. Private Sync nie kopiuje kodu pluginów (`main.js`, `styles.css`) ani nie instaluje ich automatycznie. Każde urządzenie skanuje lokalne community pluginy, dopisuje ich ID, nazwę i wersję do katalogu na serwerze oraz wysyła JSON-owe pliki ustawień z folderu danego pluginu, z pominięciem `manifest.json`.
 
-W widoku `Plugins` użytkownik widzi pluginy wykryte na innych urządzeniach. Brakujący plugin można otworzyć w oficjalnym installerze Obsidiana, a po jego instalacji kliknąć `Apply settings`, żeby wgrać zapisane ustawienia do odpowiedniego folderu `.obsidian/plugins/<plugin-id>/`.
+W widoku `Plugins` użytkownik widzi pluginy wykryte na innych urządzeniach. Brakujący plugin można otworzyć w oficjalnym installerze Obsidiana, a po jego instalacji kliknąć `Apply Server Settings`, żeby wgrać zapisane ustawienia do odpowiedniego folderu z pluginami Obsidiana.
 
 ## Duże pliki i załączniki
 

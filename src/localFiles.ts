@@ -5,6 +5,8 @@ import type PrivateSyncPlugin from "./plugin";
 import { shouldSyncPath } from "./settingsSyncPolicy";
 import type { CommunityPluginCatalogEntry, CommunityPluginSetting } from "./types";
 
+export const PRIVATE_SYNC_PLUGIN_ID = "private-sync";
+
 export type LocalSyncFile = {
   path: string;
   size: number;
@@ -88,7 +90,7 @@ export async function listLocalCommunityPluginIds(plugin: PrivateSyncPlugin): Pr
   for (const folder of listed.folders) {
     const parts = normalizePath(folder).split("/");
     const pluginId = parts[parts.length - 1];
-    if (pluginId) ids.add(pluginId);
+    if (isManagedCommunityPluginId(pluginId)) ids.add(pluginId);
   }
   return ids;
 }
@@ -101,8 +103,9 @@ export async function scanLocalCommunityPlugins(plugin: PrivateSyncPlugin): Prom
   for (const folder of listed.folders) {
     const pluginFolder = normalizePath(folder);
     const pluginId = pluginFolder.split("/").pop();
-    if (!pluginId) continue;
+    if (!isManagedCommunityPluginId(pluginId)) continue;
     const manifest = await readPluginManifest(plugin, pluginFolder, pluginId);
+    if (!isManagedCommunityPluginId(manifest.id)) continue;
     plugins.push({
       id: manifest.id || pluginId,
       name: manifest.name || pluginId,
@@ -114,6 +117,10 @@ export async function scanLocalCommunityPlugins(plugin: PrivateSyncPlugin): Prom
   }
   plugins.sort((left, right) => left.id.localeCompare(right.id));
   return plugins;
+}
+
+export function isManagedCommunityPluginId(pluginId: string | null | undefined): pluginId is string {
+  return Boolean(pluginId && pluginId !== PRIVATE_SYNC_PLUGIN_ID);
 }
 
 export async function applyCommunityPluginSettings(
