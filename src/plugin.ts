@@ -8,7 +8,7 @@ import { PairingApprovalModal, parseDevicePairingPayload } from "./pairingApprov
 import { PrivateSyncSettingTab } from "./settingsTab";
 import { SyncEngine } from "./syncEngine";
 import { PRIVATE_SYNC_VIEW, PrivateSyncView } from "./statusView";
-import type { LocalIndex, PluginSettings, ServerRequest, SyncEvent } from "./types";
+import type { LocalIndex, PluginSettings, ServerRequest, SyncEvent, VaultEncryptionKey } from "./types";
 
 type StoredData = {
   settings?: Partial<PluginSettings>;
@@ -28,6 +28,7 @@ export default class PrivateSyncPlugin extends Plugin {
   private reconnectTimeout: number | null = null;
   private statusBarItem: HTMLElement | null = null;
   private encryptionPassphrase = "";
+  private activeEncryptionKey: VaultEncryptionKey | null = null;
   private offlineNoticeShown = false;
   private activePairingRequestModals = new Set<string>();
   private unloading = false;
@@ -151,25 +152,54 @@ export default class PrivateSyncPlugin extends Plugin {
     return this.encryptionPassphrase;
   }
 
-  async setEncryptionPassphrase(passphrase: string): Promise<void> {
+  async setEncryptionPassphrase(passphrase: string, currentPassphrase = ""): Promise<void> {
     const trimmed = passphrase.trim();
+    const current = currentPassphrase.trim();
     if (!trimmed) throw new Error("Encryption passphrase cannot be empty.");
-    this.settings.encryptionKeyCheck = await createEncryptionKeyCheck(trimmed);
+    if (!this.settings.deviceToken || !this.settings.vaultId) throw new Error("Pair and link a server vault before setting encryption.");
+    const active = await this.fetchActiveEncryptionKey();
+    if (active) {
+      const currentCandidate = current || this.encryptionPassphrase;
+      if (!currentCandidate) throw new Error("Enter the current encryption passphrase before changing it.");
+      if (!(await verifyEncryptionKeyCheck(active.keyCheck, currentCandidate))) throw new Error("Current encryption passphrase is incorrect.");
+    }
+    const keyCheck = await createEncryptionKeyCheck(trimmed);
+    const key = active && (await verifyEncryptionKeyCheck(active.keyCheck, trimmed))
+      ? { id: active.id, keyCheck: active.keyCheck }
+      : await this.api.createEncryptionKey(this.settings.vaultId, keyCheck);
+    this.activeEncryptionKey = { id: key.id, keyCheck: key.keyCheck, active: true, createdAt: new Date().toISOString() };
+    this.settings.encryptionKeyCheck = key.keyCheck;
+    this.settings.encryptionKeyId = key.id;
     this.encryptionPassphrase = trimmed;
     if (this.settings.rememberEncryptionPassphrase) this.rememberEncryptionPassphrase(trimmed);
     await this.saveSettings();
+    if (active && active.id !== key.id) await this.syncEngine.queueEncryptedUploadsForRotation();
     this.refreshView();
     this.syncAfterEncryptionUnlock();
   }
 
   async unlockEncryption(passphrase: string): Promise<void> {
     const trimmed = passphrase.trim();
-    if (!this.settings.encryptionKeyCheck) throw new Error("Set an encryption passphrase first.");
-    if (!(await verifyEncryptionKeyCheck(this.settings.encryptionKeyCheck, trimmed))) {
+    const active = await this.fetchActiveEncryptionKey();
+    if (!active && !this.settings.encryptionKeyCheck) throw new Error("Set an encryption passphrase first.");
+    if (active && !(await verifyEncryptionKeyCheck(active.keyCheck, trimmed))) {
       throw new Error("Encryption passphrase is incorrect.");
     }
+    if (!active && !(await verifyEncryptionKeyCheck(this.settings.encryptionKeyCheck, trimmed))) {
+      throw new Error("Encryption passphrase is incorrect.");
+    }
+    if (!active && this.settings.encryptionKeyCheck) {
+      const key = await this.api.createEncryptionKey(this.settings.vaultId, this.settings.encryptionKeyCheck);
+      this.activeEncryptionKey = { id: key.id, keyCheck: key.keyCheck, active: true, createdAt: key.createdAt };
+      this.settings.encryptionKeyId = key.id;
+    }
     this.encryptionPassphrase = trimmed;
+    if (active) {
+      this.settings.encryptionKeyCheck = active.keyCheck;
+      this.settings.encryptionKeyId = active.id;
+    }
     if (this.settings.rememberEncryptionPassphrase) this.rememberEncryptionPassphrase(trimmed);
+    await this.saveSettings();
     this.refreshView();
     this.syncAfterEncryptionUnlock();
   }
@@ -198,6 +228,54 @@ export default class PrivateSyncPlugin extends Plugin {
     } else {
       this.forgetEncryptionPassphrase();
     }
+  }
+
+  async ensureEncryptionReadyForUpload(): Promise<string> {
+    const passphrase = this.requireEncryptionPassphrase();
+    const active = await this.fetchActiveEncryptionKey();
+    if (!active) {
+      if (!this.settings.encryptionKeyCheck || !(await verifyEncryptionKeyCheck(this.settings.encryptionKeyCheck, passphrase))) {
+        throw new Error("Set the server encryption passphrase first.");
+      }
+      const key = await this.api.createEncryptionKey(this.settings.vaultId, this.settings.encryptionKeyCheck);
+      this.activeEncryptionKey = { id: key.id, keyCheck: key.keyCheck, active: true, createdAt: key.createdAt };
+      this.settings.encryptionKeyId = key.id;
+      await this.saveSettings();
+      return key.id;
+    }
+    if (!(await verifyEncryptionKeyCheck(active.keyCheck, passphrase))) throw new Error("Encryption passphrase does not match this server vault.");
+    this.settings.encryptionKeyCheck = active.keyCheck;
+    this.settings.encryptionKeyId = active.id;
+    await this.saveSettings();
+    return active.id;
+  }
+
+  async ensureEncryptionReadyForDownload(encryptionKeyId: string | null): Promise<void> {
+    const passphrase = this.requireEncryptionPassphrase();
+    const active = await this.fetchActiveEncryptionKey();
+    const keyCheck = active?.keyCheck ?? this.settings.encryptionKeyCheck;
+    if (!keyCheck) throw new Error("Set the server encryption passphrase first.");
+    if (encryptionKeyId && active && encryptionKeyId !== active.id) {
+      throw new Error("This revision was encrypted with an older passphrase. Use the history view and enter that old passphrase.");
+    }
+    if (!(await verifyEncryptionKeyCheck(keyCheck, passphrase))) throw new Error("Encryption passphrase does not match this server vault.");
+  }
+
+  async getEncryptionKeyForRevision(encryptionKeyId: string | null | undefined): Promise<VaultEncryptionKey | null> {
+    const response = await this.api.getEncryptionKeys(this.settings.vaultId);
+    return response.keys.find((key) => key.id === encryptionKeyId) ?? null;
+  }
+
+  private async fetchActiveEncryptionKey(): Promise<VaultEncryptionKey | null> {
+    if (!this.settings.deviceToken || !this.settings.vaultId) return null;
+    const response = await this.api.getEncryptionKeys(this.settings.vaultId);
+    const active = response.active;
+    this.activeEncryptionKey = active;
+    if (active) {
+      this.settings.encryptionKeyCheck = active.keyCheck;
+      this.settings.encryptionKeyId = active.id;
+    }
+    return active;
   }
 
   private rememberEncryptionPassphrase(passphrase: string): void {

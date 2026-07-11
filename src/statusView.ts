@@ -1,4 +1,5 @@
 import { ItemView, Modal, Notice, WorkspaceLeaf } from "obsidian";
+import { verifyEncryptionKeyCheck } from "./crypto";
 import { readLocalBinary } from "./localFiles";
 import { parseDevicePairingPayload } from "./pairingApprovalModal";
 import { ConflictDiffModal, decodeText, TextPreviewModal } from "./textPreviewModal";
@@ -655,6 +656,9 @@ export class PrivateSyncView extends ItemView {
     preview.disabled = Boolean(entry.deleted);
     preview.onclick = () => this.previewRevision(entry);
     this.actionButton(actions, "Restore", "success").onclick = () => this.restoreRevision(entry);
+    if (!entry.deleted && !entry.encrypted) {
+      this.actionButton(actions, "Encrypt history", "subtle").onclick = () => this.encryptHistoryRevision(entry);
+    }
   }
 
   private decisionRequestRow(parent: Element, request: ServerRequest): void {
@@ -698,7 +702,7 @@ export class PrivateSyncView extends ItemView {
 
   private async previewRevision(entry: FileHistoryEntry): Promise<void> {
     try {
-      const content = decodeText(await this.plugin.syncEngine.downloadHistoryEntryPlain(entry));
+      const content = decodeText(await this.downloadHistoryEntryForUi(entry));
       new TextPreviewModal(this.plugin, `Revision ${entry.vaultRevision}: ${this.historyPath}`, content).open();
     } catch (error) {
       new Notice(`Private Sync preview failed: ${errorMessage(error)}`, 10000);
@@ -707,6 +711,14 @@ export class PrivateSyncView extends ItemView {
 
   private async restoreRevision(entry: FileHistoryEntry): Promise<void> {
     try {
+      if (entry.encrypted && this.isOlderEncryptedHistoryEntry(entry)) {
+        const passphrase = await this.promptHistoryPassphrase(entry);
+        if (!passphrase) return;
+        await this.plugin.syncEngine.restoreHistoryEntryToLocalWithPassphrase(this.historyPath, entry, passphrase);
+        new Notice(`Private Sync: restored revision ${entry.vaultRevision} locally and uploaded with the active encryption key.`, 10000);
+        this.render();
+        return;
+      }
       await this.plugin.api.restoreRevision(this.plugin.settings.vaultId, entry.id);
       new Notice(`Private Sync: restored revision ${entry.vaultRevision}.`, 8000);
       await this.plugin.syncEngine.syncNow();
@@ -714,6 +726,44 @@ export class PrivateSyncView extends ItemView {
     } catch (error) {
       new Notice(`Private Sync restore failed: ${errorMessage(error)}`, 10000);
     }
+  }
+
+  private async encryptHistoryRevision(entry: FileHistoryEntry): Promise<void> {
+    try {
+      await this.plugin.syncEngine.encryptPlaintextHistoryEntry(entry);
+      new Notice(`Private Sync: encrypted history revision ${entry.vaultRevision}.`, 8000);
+      this.render();
+    } catch (error) {
+      new Notice(`Private Sync history encryption failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
+  private async downloadHistoryEntryForUi(entry: FileHistoryEntry): Promise<ArrayBuffer> {
+    if (!entry.encrypted || !this.isOlderEncryptedHistoryEntry(entry)) {
+      try {
+        return await this.plugin.syncEngine.downloadHistoryEntryPlain(entry);
+      } catch (error) {
+        if (!entry.encrypted) throw error;
+      }
+    }
+    const passphrase = await this.promptHistoryPassphrase(entry);
+    if (!passphrase) throw new Error("Passphrase was not entered.");
+    return this.plugin.syncEngine.downloadHistoryEntryPlainWithPassphrase(entry, passphrase);
+  }
+
+  private isOlderEncryptedHistoryEntry(entry: FileHistoryEntry): boolean {
+    return Boolean(entry.encrypted && (!entry.encryptionKeyId || entry.encryptionKeyId !== this.plugin.settings.encryptionKeyId));
+  }
+
+  private async promptHistoryPassphrase(entry: FileHistoryEntry): Promise<string | null> {
+    const key = entry.encryptionKeyId ? await this.plugin.getEncryptionKeyForRevision(entry.encryptionKeyId) : null;
+    return openHistoryPassphraseModal(this.plugin, {
+      title: `Passphrase for revision ${entry.vaultRevision}`,
+      description: key
+        ? "This revision was encrypted with an older passphrase. Enter that passphrase for this action only."
+        : "This older encrypted revision has no key metadata. Enter the passphrase that was used when it was uploaded.",
+      keyCheck: key?.keyCheck ?? null
+    });
   }
 
   private showEventDetails(event: SyncEvent): void {
@@ -867,6 +917,85 @@ class VaultDeleteModal extends Modal {
       this.deleteButton.textContent = "Delete permanently";
       this.updateState();
     }
+  }
+}
+
+function openHistoryPassphraseModal(
+  plugin: PrivateSyncPlugin,
+  input: { title: string; description: string; keyCheck: string | null }
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    new HistoryPassphraseModal(plugin, input, resolve).open();
+  });
+}
+
+class HistoryPassphraseModal extends Modal {
+  private input: HTMLInputElement | null = null;
+  private submitButton: HTMLButtonElement | null = null;
+  private resolved = false;
+
+  constructor(
+    plugin: PrivateSyncPlugin,
+    private readonly details: { title: string; description: string; keyCheck: string | null },
+    private readonly resolve: (passphrase: string | null) => void
+  ) {
+    super(plugin.app);
+  }
+
+  onOpen(): void {
+    this.contentEl.empty();
+    this.contentEl.addClass("private-sync-vault-modal");
+    this.contentEl.createEl("h2", { text: this.details.title });
+    this.contentEl.createDiv({ text: this.details.description, cls: "private-sync-muted" });
+    this.input = this.contentEl.createEl("input", {
+      type: "password",
+      placeholder: "Old encryption passphrase",
+      cls: "private-sync-modal-input"
+    });
+    this.input.oninput = () => this.updateState();
+    this.input.onkeydown = (event) => {
+      if (event.key === "Enter") this.submit();
+    };
+    const actions = this.contentEl.createDiv({ cls: "private-sync-modal-actions" });
+    actions.createEl("button", { text: "Cancel", cls: "private-sync-button private-sync-button-subtle" }).onclick = () => this.finish(null);
+    this.submitButton = actions.createEl("button", { text: "Use once", cls: "private-sync-button private-sync-button-primary" });
+    this.submitButton.onclick = () => this.submit();
+    this.updateState();
+    this.input.focus();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+    if (!this.resolved) this.resolve(null);
+  }
+
+  private updateState(): void {
+    if (!this.input || !this.submitButton) return;
+    this.submitButton.disabled = this.input.value.trim().length === 0;
+  }
+
+  private async submit(): Promise<void> {
+    if (!this.input || !this.submitButton || this.submitButton.disabled) return;
+    const passphrase = this.input.value.trim();
+    this.submitButton.disabled = true;
+    this.submitButton.textContent = "Checking...";
+    try {
+      if (this.details.keyCheck && !(await verifyEncryptionKeyCheck(this.details.keyCheck, passphrase))) {
+        throw new Error("Passphrase does not match this revision key.");
+      }
+      this.finish(passphrase);
+    } catch (error) {
+      new Notice(`Private Sync history passphrase failed: ${errorMessage(error)}`, 10000);
+      this.submitButton.disabled = false;
+      this.submitButton.textContent = "Use once";
+      this.updateState();
+    }
+  }
+
+  private finish(passphrase: string | null): void {
+    this.resolved = true;
+    this.resolve(passphrase);
+    this.close();
   }
 }
 

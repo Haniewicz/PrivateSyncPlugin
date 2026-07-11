@@ -5,6 +5,7 @@ import type { DeviceType, ServerVault } from "./types";
 export class PrivateSyncSettingTab extends PluginSettingTab {
   private pairingPassword = "";
   private recoveryPairingCode = "";
+  private currentEncryptionPassphrase = "";
   private encryptionPassphrase = "";
   private encryptionUnlockPassphrase = "";
   private newVaultName = "";
@@ -346,13 +347,24 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName(this.plugin.settings.encryptionKeyCheck ? "Change encryption passphrase" : "Set encryption passphrase")
       .setDesc(
-        this.plugin.settings.rememberEncryptionPassphrase
-          ? "The passphrase unlocks encryption and is stored locally in Obsidian SecretStorage."
-          : "The passphrase is not saved. It unlocks encryption for the current Obsidian session."
+        this.plugin.settings.encryptionKeyId
+          ? "Changing the passphrase re-uploads active encrypted files with the new server key. Old history can still be opened with the old passphrase."
+          : this.plugin.settings.rememberEncryptionPassphrase
+            ? "The passphrase unlocks encryption and is stored locally in Obsidian SecretStorage."
+            : "The passphrase is not saved. It unlocks encryption for the current Obsidian session."
       )
       .addText((text) =>
         text
-          .setPlaceholder("Passphrase")
+          .setPlaceholder("Current passphrase")
+          .setValue(this.currentEncryptionPassphrase)
+          .setDisabled(!this.plugin.settings.encryptionKeyId)
+          .onChange((value) => {
+            this.currentEncryptionPassphrase = value;
+          })
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder(this.plugin.settings.encryptionKeyId ? "New passphrase" : "Passphrase")
           .setValue(this.encryptionPassphrase)
           .onChange((value) => {
             this.encryptionPassphrase = value;
@@ -363,8 +375,9 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
           button.setDisabled(true);
           button.setButtonText("Saving...");
           try {
-            await this.plugin.setEncryptionPassphrase(this.encryptionPassphrase);
+            await this.plugin.setEncryptionPassphrase(this.encryptionPassphrase, this.currentEncryptionPassphrase);
             this.encryptionPassphrase = "";
+            this.currentEncryptionPassphrase = "";
             new Notice("Private Sync: encryption passphrase saved and unlocked.", 8000);
             this.display();
           } catch (error) {
@@ -376,8 +389,9 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
         })
       )
       .then((setting) => {
-        const input = setting.controlEl.querySelector("input");
-        if (input) input.type = "password";
+        setting.controlEl.querySelectorAll("input").forEach((input) => {
+          input.type = "password";
+        });
       });
 
     new Setting(containerEl)

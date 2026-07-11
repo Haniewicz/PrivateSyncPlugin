@@ -11,7 +11,8 @@ import type {
   ServerStorageUsage,
   ServerVault,
   StorageCleanupTarget,
-  VaultConnectionAssessment
+  VaultConnectionAssessment,
+  VaultEncryptionKey
 } from "./types";
 
 type ApiRequestInit = Omit<RequestUrlParam, "url"> & { authenticated?: boolean };
@@ -60,6 +61,14 @@ export class ApiClient {
 
   async deleteVault(vaultId: string): Promise<{ ok: true }> {
     return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/delete`, {});
+  }
+
+  async getEncryptionKeys(vaultId: string): Promise<{ active: VaultEncryptionKey | null; keys: VaultEncryptionKey[] }> {
+    return this.get(`/api/v1/vaults/${encodeURIComponent(vaultId)}/encryption-keys`);
+  }
+
+  async createEncryptionKey(vaultId: string, keyCheck: string): Promise<{ id: string; keyCheck: string; active: true; createdAt: string }> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/encryption-keys`, { keyCheck });
   }
 
   async assessVaultConnection(
@@ -224,6 +233,28 @@ export class ApiClient {
     return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/files/revisions/${encodeURIComponent(String(revisionId))}/restore`, {});
   }
 
+  async encryptRevision(
+    vaultId: string,
+    revisionId: number,
+    input: {
+      contentHash: string;
+      size: number;
+      plaintextHash: string;
+      plaintextSize: number;
+      encryptionKeyId: string;
+      content: ArrayBuffer;
+    }
+  ): Promise<{ ok: true; contentHash: string; size: number; encryptionKeyId: string }> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/files/revisions/${encodeURIComponent(String(revisionId))}/encrypt`, {
+      contentHash: input.contentHash,
+      size: input.size,
+      plaintextHash: input.plaintextHash,
+      plaintextSize: input.plaintextSize,
+      encryptionKeyId: input.encryptionKeyId,
+      contentBase64: base64Encode(new Uint8Array(input.content))
+    });
+  }
+
   async storageUsage(): Promise<ServerStorageUsage> {
     return this.get("/api/v1/storage/usage");
   }
@@ -271,6 +302,14 @@ export class ApiClient {
     }
     return response;
   }
+}
+
+function base64Encode(bytes: Uint8Array): string {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.slice(index, index + 0x8000));
+  }
+  return btoa(binary);
 }
 
 function formatHttpError(response: RequestUrlResponse): string {

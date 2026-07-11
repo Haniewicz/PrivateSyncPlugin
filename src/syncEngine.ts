@@ -394,11 +394,13 @@ export class SyncEngine {
         });
         continue;
       }
+      const encryptionKeyId = shouldEncrypt ? await this.plugin.ensureEncryptionReadyForUpload() : null;
       const uploadContent = await this.prepareUploadContent(content, shouldEncrypt);
       const contentHash = await sha256(uploadContent);
       operation.contentHash = contentHash;
       operation.size = uploadContent.byteLength;
       operation.encrypted = shouldEncrypt;
+      operation.encryptionKeyId = encryptionKeyId;
       operation.plaintextHash = shouldEncrypt ? plaintextHash : undefined;
       operation.plaintextSize = shouldEncrypt ? content.byteLength : undefined;
       const record = index.files[operation.path];
@@ -654,6 +656,103 @@ export class SyncEngine {
   async downloadHistoryEntryPlain(entry: { id: number; encrypted: number | boolean; deleted?: number }): Promise<ArrayBuffer> {
     if (entry.deleted) throw new Error("Deleted revisions cannot be downloaded.");
     return this.downloadRevisionPlain(entry);
+  }
+
+  async downloadHistoryEntryPlainWithPassphrase(
+    entry: { id: number; encrypted: number | boolean; deleted?: number },
+    passphrase: string
+  ): Promise<ArrayBuffer> {
+    if (entry.deleted) throw new Error("Deleted revisions cannot be downloaded.");
+    const content = await this.api.downloadRevision(this.plugin.settings.vaultId, entry.id);
+    if (!entry.encrypted) return content;
+    return decryptBytes(content, passphrase);
+  }
+
+  async encryptPlaintextHistoryEntry(entry: { id: number; encrypted: number | boolean; deleted?: number; contentHash: string | null; size: number }): Promise<void> {
+    if (entry.deleted) throw new Error("Deleted revisions cannot be encrypted.");
+    if (entry.encrypted) throw new Error("Revision is already encrypted.");
+    if (!entry.contentHash) throw new Error("Revision content hash is unavailable.");
+    const encryptionKeyId = await this.plugin.ensureEncryptionReadyForUpload();
+    const plaintext = await this.api.downloadRevision(this.plugin.settings.vaultId, entry.id);
+    const plaintextHash = await sha256(plaintext);
+    if (plaintextHash !== entry.contentHash || plaintext.byteLength !== entry.size) throw new Error("Revision changed before encryption.");
+    const encrypted = await encryptBytes(plaintext, this.plugin.requireEncryptionPassphrase());
+    const contentHash = await sha256(encrypted);
+    await this.api.encryptRevision(this.plugin.settings.vaultId, entry.id, {
+      contentHash,
+      size: encrypted.byteLength,
+      plaintextHash,
+      plaintextSize: plaintext.byteLength,
+      encryptionKeyId,
+      content: encrypted
+    });
+  }
+
+  async restoreHistoryEntryToLocalWithPassphrase(
+    path: string,
+    entry: { id: number; encrypted: number | boolean; deleted?: number },
+    passphrase: string
+  ): Promise<void> {
+    const content = await this.downloadHistoryEntryPlainWithPassphrase(entry, passphrase);
+    await this.writeFile(path, content);
+    const stat = await getLocalFileStat(this.plugin, path);
+    const localHash = await sha256(content);
+    const history = await this.api.history(this.plugin.settings.vaultId, path);
+    const current = history.history[0];
+    const index = this.indexStore.get();
+    index.files[path] = {
+      path,
+      localHash,
+      size: stat?.size ?? content.byteLength,
+      mtime: stat?.mtime ?? Date.now(),
+      serverRevisionId: current?.id ?? null,
+      status: "dirty_local",
+      wasSynced: Boolean(current)
+    };
+    await this.indexStore.removePathFromQueue(path);
+    await this.indexStore.enqueue({
+      clientChangeId: uuid(),
+      type: current ? "update" : "create",
+      path,
+      baseRevisionId: current?.id ?? null,
+      contentHash: localHash,
+      size: content.byteLength,
+      detectedAt: new Date().toISOString()
+    });
+    await this.indexStore.save();
+    await this.pushQueue();
+    await this.pullChanges();
+  }
+
+  async queueEncryptedUploadsForRotation(): Promise<void> {
+    const index = this.indexStore.get();
+    for (const file of await this.getAllLocalFilesForScan()) {
+      if (!this.isSyncableLocalFile(file)) continue;
+      const path = normalizePath(file.path);
+      const content = await readLocalBinary(this.plugin, path);
+      if (!this.shouldEncryptUpload(path, content)) continue;
+      const localHash = await sha256(content);
+      const record = index.files[path] ?? {
+        path,
+        localHash,
+        size: file.size,
+        mtime: file.mtime,
+        serverRevisionId: null,
+        status: "dirty_local" as const,
+        wasSynced: false
+      };
+      index.files[path] = {
+        ...record,
+        localHash,
+        size: file.size,
+        mtime: file.mtime,
+        status: "pending_upload"
+      };
+      if (!index.queue.some((operation) => operation.path === path && operation.type !== "delete")) {
+        await this.enqueueFile(file, record.wasSynced ? "update" : "create", record.serverRevisionId, localHash);
+      }
+    }
+    await this.indexStore.save();
   }
 
   private async applyServerChange(change: ServerChange, localPluginIds: Set<string>): Promise<ApplyServerChangeResult> {
@@ -1183,14 +1282,15 @@ export class SyncEngine {
   }
 
   private async decryptRemoteContent(
-    revision: { encrypted: number | boolean; path?: string; fileRevisionId?: number; id?: number },
+    revision: { encrypted: number | boolean; path?: string; fileRevisionId?: number; id?: number; encryptionKeyId?: string | null },
     content: ArrayBuffer
   ): Promise<ArrayBuffer> {
     if (!revision.encrypted) return content;
+    await this.plugin.ensureEncryptionReadyForDownload(revision.encryptionKeyId ?? null);
     return decryptBytes(content, this.plugin.requireEncryptionPassphrase());
   }
 
-  private async downloadRevisionPlain(revision: { id: number; encrypted: number | boolean }): Promise<ArrayBuffer> {
+  private async downloadRevisionPlain(revision: { id: number; encrypted: number | boolean; encryptionKeyId?: string | null }): Promise<ArrayBuffer> {
     const content = await this.api.downloadRevision(this.plugin.settings.vaultId, revision.id);
     return this.decryptRemoteContent(revision, content);
   }

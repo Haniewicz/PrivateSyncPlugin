@@ -34,6 +34,7 @@ export type PendingOperation = {
   size?: number;
   encrypted?: boolean;
   encryptedFileKey?: string | null;
+  encryptionKeyId?: string | null;
   plaintextHash?: string;
   plaintextSize?: number;
   detectedAt: string;
@@ -75,6 +76,7 @@ export type PluginSettings = {
   largeFileThresholdMb: number;
   encryptionEnabled: boolean;
   encryptionKeyCheck: string;
+  encryptionKeyId: string;
   rememberEncryptionPassphrase: boolean;
 };
 
@@ -82,6 +84,16 @@ export type ServerVault = {
   id: string;
   name: string;
   currentRevision: number;
+  encryptionKeyId?: string | null;
+  encryptionKeyCheck?: string | null;
+};
+
+export type VaultEncryptionKey = {
+  id: string;
+  keyCheck: string;
+  active: number | boolean;
+  createdAt: string;
+  retiredAt?: string | null;
 };
 
 export type VaultManifest = {
@@ -116,6 +128,7 @@ export type ServerChange = {
   plaintextSize?: number | null;
   deleted: number;
   encrypted: number;
+  encryptionKeyId?: string | null;
   deviceId?: string;
   createdAt: string;
 };
@@ -176,6 +189,7 @@ export type FileHistoryEntry = {
   plaintextSize?: number | null;
   deleted: number;
   encrypted: number;
+  encryptionKeyId?: string | null;
   deviceId: string;
   createdAt: string;
 };

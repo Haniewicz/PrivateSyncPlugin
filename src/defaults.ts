@@ -21,6 +21,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   largeFileThresholdMb: 10,
   encryptionEnabled: false,
   encryptionKeyCheck: "",
+  encryptionKeyId: "",
   rememberEncryptionPassphrase: false
 };
 
