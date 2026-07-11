@@ -1,10 +1,10 @@
 import { Notice, TFile, normalizePath } from "obsidian";
 import { ApiClient } from "./apiClient";
-import { decryptBytes, encryptBytes, sha256, uuid } from "./crypto";
+import { decryptBytes, encryptBytes, isEncryptedPayload, sha256, uuid } from "./crypto";
 import { chunkSizeBytes, shouldAutoSyncPath, shouldUseChunkedTransfer } from "./filePolicy";
 import { getLocalFileStat, listLocalCommunityPluginIds, listLocalSyncFiles, readLocalBinary, trashLocalPath, type LocalSyncFile, writeLocalBinary } from "./localFiles";
 import type { LocalIndexStore } from "./localIndex";
-import { encryptedPlaceholderInfo, encryptedPlaceholderText, isEncryptedPlaceholder, isMarkedForServerEncryption } from "./noteEncryption";
+import { encryptedPlaceholderInfo, encryptedPlaceholderText, isEncryptedNoteBody, isEncryptedPlaceholder, isMarkedForServerEncryption } from "./noteEncryption";
 import type PrivateSyncPlugin from "./plugin";
 import { collectCommunityPluginIds, getCommunityPluginId, shouldSyncPath } from "./settingsSyncPolicy";
 import type { LocalFileRecord, PendingOperation, ServerChange } from "./types";
@@ -301,11 +301,14 @@ export class SyncEngine {
       }
       const previous = index.files[path];
       if (previous && previous.size === file.size && previous.mtime === file.mtime && previous.status === "synced") {
-        continue;
+        if (!isMarkdownPath(path)) continue;
+        const existingContent = await readLocalBinary(this.plugin, path);
+        if (!isLocalEncryptedMarkdownText(decodeUtf8(existingContent))) continue;
       }
       const content = await readLocalBinary(this.plugin, path);
       if (isMarkdownPath(path)) {
-        const placeholderInfo = encryptedPlaceholderInfo(decodeUtf8(content));
+        const markdownText = decodeUtf8(content);
+        const placeholderInfo = encryptedPlaceholderInfo(markdownText);
         if (placeholderInfo) {
           index.files[path] = {
             path,
@@ -313,6 +316,22 @@ export class SyncEngine {
             size: file.size,
             mtime: file.mtime,
             serverRevisionId: placeholderInfo.fileRevisionId ?? previous?.serverRevisionId ?? null,
+            status: "pending_download",
+            wasSynced: true
+          };
+          await this.indexStore.removePathFromQueue(path);
+          seen.add(path);
+          continue;
+        }
+        if (isLocalEncryptedMarkdownText(markdownText)) {
+          const history = await this.api.history(this.plugin.settings.vaultId, path).catch(() => null);
+          const current = history?.history[0];
+          index.files[path] = {
+            path,
+            localHash: null,
+            size: file.size,
+            mtime: file.mtime,
+            serverRevisionId: current?.id ?? previous?.serverRevisionId ?? null,
             status: "pending_download",
             wasSynced: true
           };
@@ -1052,7 +1071,10 @@ export class SyncEngine {
     const stat = await getLocalFileStat(this.plugin, path);
     if (!stat) return false;
     const content = await readLocalBinary(this.plugin, path);
-    if (isMarkdownPath(path) && isEncryptedPlaceholder(decodeUtf8(content))) return false;
+    if (isMarkdownPath(path)) {
+      const markdownText = decodeUtf8(content);
+      if (isEncryptedPlaceholder(markdownText) || isLocalEncryptedMarkdownText(markdownText)) return false;
+    }
     const currentHash = await sha256(content);
     return currentHash !== indexedHash;
   }
@@ -1452,6 +1474,10 @@ function isTextLikePath(path: string): boolean {
 function isMarkdownPath(path: string): boolean {
   const extension = path.split(".").pop()?.toLowerCase() ?? "";
   return extension === "md" || extension === "markdown";
+}
+
+function isLocalEncryptedMarkdownText(text: string): boolean {
+  return isEncryptedNoteBody(text) || isEncryptedPayload(text.trim());
 }
 
 function mergeTextThreeWay(baseText: string, localText: string, remoteText: string): ThreeWayMergeResult | null {

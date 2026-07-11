@@ -1,12 +1,10 @@
-import { App, Notice, PluginSettingTab, Setting, type DropdownComponent } from "obsidian";
+import { App, Modal, Notice, PluginSettingTab, Setting, type DropdownComponent } from "obsidian";
 import type PrivateSyncPlugin from "./plugin";
 import type { DeviceType, ServerVault } from "./types";
 
 export class PrivateSyncSettingTab extends PluginSettingTab {
   private pairingPassword = "";
   private recoveryPairingCode = "";
-  private currentEncryptionPassphrase = "";
-  private encryptionPassphrase = "";
   private encryptionUnlockPassphrase = "";
   private newVaultName = "";
   private vaultNames = new Map<string, string>();
@@ -345,73 +343,28 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName(this.plugin.settings.encryptionKeyCheck ? "Change encryption passphrase" : "Set encryption passphrase")
+      .setName(this.plugin.settings.encryptionKeyCheck ? "Unlock vault encryption" : "Set vault encryption passphrase")
       .setDesc(
-        this.plugin.settings.encryptionKeyId
-          ? "Changing the passphrase re-uploads active encrypted files with the new server key. Old history can still be opened with the old passphrase."
+        this.plugin.isEncryptionUnlocked()
+          ? "Encryption is unlocked for this session."
           : this.plugin.settings.rememberEncryptionPassphrase
-            ? "The passphrase unlocks encryption and is stored locally in Obsidian SecretStorage."
-            : "The passphrase is not saved. It unlocks encryption for the current Obsidian session."
+            ? "The passphrase will be saved locally after it is used successfully."
+            : "Enter the vault encryption passphrase for this session."
       )
-      .addText((text) =>
-        text
-          .setPlaceholder("Current passphrase")
-          .setValue(this.currentEncryptionPassphrase)
-          .setDisabled(!this.plugin.settings.encryptionKeyId)
-          .onChange((value) => {
-            this.currentEncryptionPassphrase = value;
-          })
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder(this.plugin.settings.encryptionKeyId ? "New passphrase" : "Passphrase")
-          .setValue(this.encryptionPassphrase)
-          .onChange((value) => {
-            this.encryptionPassphrase = value;
-          })
-      )
-      .addButton((button) =>
-        button.setButtonText("Save").setClass("private-sync-button").setClass("private-sync-button-primary").onClick(async () => {
-          button.setDisabled(true);
-          button.setButtonText("Saving...");
-          try {
-            await this.plugin.setEncryptionPassphrase(this.encryptionPassphrase, this.currentEncryptionPassphrase);
-            this.encryptionPassphrase = "";
-            this.currentEncryptionPassphrase = "";
-            new Notice("Private Sync: encryption passphrase saved and unlocked.", 8000);
-            this.display();
-          } catch (error) {
-            new Notice(`Private Sync encryption setup failed: ${errorMessage(error)}`, 10000);
-          } finally {
-            button.setDisabled(false);
-            button.setButtonText("Save");
-          }
-        })
-      )
-      .then((setting) => {
-        setting.controlEl.querySelectorAll("input").forEach((input) => {
-          input.type = "password";
-        });
-      });
-
-    new Setting(containerEl)
-      .setName("Unlock encryption")
-      .setDesc(this.plugin.isEncryptionUnlocked() ? "Encryption is unlocked for this session." : "Required after restarting Obsidian before encrypted sync or fragment commands can decrypt data.")
       .addText((text) =>
         text
           .setPlaceholder("Passphrase")
           .setValue(this.encryptionUnlockPassphrase)
-          .setDisabled(!this.plugin.settings.encryptionKeyCheck || this.plugin.isEncryptionUnlocked())
+          .setDisabled(this.plugin.isEncryptionUnlocked())
           .onChange((value) => {
             this.encryptionUnlockPassphrase = value;
           })
       )
       .addButton((button) =>
         button
-          .setButtonText(this.plugin.isEncryptionUnlocked() ? "Lock" : "Unlock")
+          .setButtonText(this.plugin.isEncryptionUnlocked() ? "Lock" : this.plugin.settings.encryptionKeyCheck ? "Unlock" : "Set up")
           .setClass("private-sync-button")
           .setClass(this.plugin.isEncryptionUnlocked() ? "private-sync-button-subtle" : "private-sync-button-primary")
-          .setDisabled(!this.plugin.settings.encryptionKeyCheck)
           .onClick(async () => {
             if (this.plugin.isEncryptionUnlocked()) {
               this.plugin.lockEncryption();
@@ -419,17 +372,22 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
               return;
             }
             button.setDisabled(true);
-            button.setButtonText("Unlocking...");
+            button.setButtonText(this.plugin.settings.encryptionKeyCheck ? "Unlocking..." : "Saving...");
             try {
-              await this.plugin.unlockEncryption(this.encryptionUnlockPassphrase);
+              const hadEncryptionPassphrase = Boolean(this.plugin.settings.encryptionKeyCheck);
+              if (this.plugin.settings.encryptionKeyCheck) {
+                await this.plugin.unlockEncryption(this.encryptionUnlockPassphrase);
+              } else {
+                await this.plugin.setEncryptionPassphrase(this.encryptionUnlockPassphrase);
+              }
               this.encryptionUnlockPassphrase = "";
-              new Notice("Private Sync: encryption unlocked.", 8000);
+              new Notice(hadEncryptionPassphrase ? "Private Sync: encryption unlocked." : "Private Sync: encryption passphrase saved and unlocked.", 8000);
               this.display();
             } catch (error) {
-              new Notice(`Private Sync unlock failed: ${errorMessage(error)}`, 10000);
+              new Notice(`Private Sync encryption failed: ${errorMessage(error)}`, 10000);
             } finally {
               button.setDisabled(false);
-              button.setButtonText("Unlock");
+              button.setButtonText(this.plugin.settings.encryptionKeyCheck ? "Unlock" : "Set up");
             }
           })
       )
@@ -437,6 +395,20 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
         const input = setting.controlEl.querySelector("input");
         if (input) input.type = "password";
       });
+
+    new Setting(containerEl)
+      .setName("Change encryption passphrase")
+      .setDesc("Changing the passphrase re-uploads active encrypted files with the new server key. Old history can still be opened with the old passphrase.")
+      .addButton((button) =>
+        button
+          .setButtonText("Change...")
+          .setClass("private-sync-button")
+          .setClass("private-sync-button-subtle")
+          .setDisabled(!this.plugin.settings.encryptionKeyCheck || !this.plugin.isEncryptionUnlocked())
+          .onClick(() => {
+            new EncryptionPassphraseChangeModal(this.plugin, () => this.display()).open();
+          })
+      );
   }
 
   private async loadVaultOptions(dropdown: DropdownComponent): Promise<void> {
@@ -480,6 +452,87 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
     this.plugin.settings.vaultName = this.vaultNames.get(vaultId) ?? "";
     await this.plugin.saveSettings();
     this.plugin.refreshView();
+  }
+}
+
+class EncryptionPassphraseChangeModal extends Modal {
+  private passphrase = "";
+  private repeatedPassphrase = "";
+  private submitButton: HTMLButtonElement | null = null;
+
+  constructor(
+    private readonly plugin: PrivateSyncPlugin,
+    private readonly onChanged: () => void
+  ) {
+    super(plugin.app);
+  }
+
+  onOpen(): void {
+    this.contentEl.empty();
+    this.contentEl.addClass("private-sync-vault-modal");
+    this.contentEl.createEl("h2", { text: "Change encryption passphrase" });
+    this.contentEl.createDiv({
+      text: "Changing the passphrase re-uploads active encrypted files with the new server key.",
+      cls: "private-sync-muted"
+    });
+
+    const passphraseInput = this.contentEl.createEl("input", {
+      type: "password",
+      placeholder: "New passphrase",
+      cls: "private-sync-modal-input"
+    });
+    passphraseInput.oninput = () => {
+      this.passphrase = passphraseInput.value;
+      this.updateState();
+    };
+
+    const repeatedInput = this.contentEl.createEl("input", {
+      type: "password",
+      placeholder: "Repeat new passphrase",
+      cls: "private-sync-modal-input"
+    });
+    repeatedInput.oninput = () => {
+      this.repeatedPassphrase = repeatedInput.value;
+      this.updateState();
+    };
+    repeatedInput.onkeydown = (event) => {
+      if (event.key === "Enter") this.submit();
+    };
+
+    const actions = this.contentEl.createDiv({ cls: "private-sync-modal-actions" });
+    actions.createEl("button", { text: "Cancel", cls: "private-sync-button private-sync-button-subtle" }).onclick = () => this.close();
+    this.submitButton = actions.createEl("button", { text: "Change", cls: "private-sync-button private-sync-button-primary" });
+    this.submitButton.onclick = () => this.submit();
+    this.updateState();
+    passphraseInput.focus();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+    this.passphrase = "";
+    this.repeatedPassphrase = "";
+  }
+
+  private updateState(): void {
+    if (!this.submitButton) return;
+    this.submitButton.disabled = this.passphrase.trim().length === 0 || this.repeatedPassphrase.trim().length === 0 || this.passphrase !== this.repeatedPassphrase;
+  }
+
+  private async submit(): Promise<void> {
+    if (!this.submitButton || this.submitButton.disabled) return;
+    this.submitButton.disabled = true;
+    this.submitButton.textContent = "Changing...";
+    try {
+      await this.plugin.setEncryptionPassphrase(this.passphrase);
+      new Notice("Private Sync: encryption passphrase changed and unlocked.", 10000);
+      this.onChanged();
+      this.close();
+    } catch (error) {
+      new Notice(`Private Sync passphrase change failed: ${errorMessage(error)}`, 10000);
+      this.submitButton.disabled = false;
+      this.submitButton.textContent = "Change";
+      this.updateState();
+    }
   }
 }
 
