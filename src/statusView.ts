@@ -42,6 +42,7 @@ export class PrivateSyncView extends ItemView {
   private historyPath = "";
   private selectedConflictKeys = new Set<string>();
   private ignoredExpanded = false;
+  private communityPluginEnabledOverrides = new Map<string, boolean>();
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: PrivateSyncPlugin) {
     super(leaf);
@@ -654,6 +655,8 @@ export class PrivateSyncView extends ItemView {
   }
 
   private isCommunityPluginEnabled(pluginId: string): boolean {
+    const override = this.communityPluginEnabledOverrides.get(pluginId);
+    if (override !== undefined) return override;
     const manager = this.communityPluginManager();
     const enabledPlugins = manager.enabledPlugins;
     if (Array.isArray(enabledPlugins)) return enabledPlugins.includes(pluginId);
@@ -667,6 +670,7 @@ export class PrivateSyncView extends ItemView {
       const action = enabled ? manager.enablePlugin : manager.disablePlugin;
       if (typeof action !== "function") throw new Error("This Obsidian version does not expose plugin enable/disable controls.");
       await action.call(manager, pluginId);
+      this.communityPluginEnabledOverrides.set(pluginId, enabled);
       new Notice(`Private Sync: ${enabled ? "enabled" : "disabled"} ${pluginId}.`, 8000);
       this.render();
     } catch (error) {
@@ -687,6 +691,7 @@ export class PrivateSyncView extends ItemView {
       } else {
         await this.plugin.app.vault.adapter.rmdir(normalizePath(`${this.plugin.app.vault.configDir}/plugins/${pluginId}`), true);
       }
+      this.communityPluginEnabledOverrides.delete(pluginId);
       new Notice(`Private Sync: uninstalled ${entry.name || pluginId}.`, 8000);
       this.render();
     } catch (error) {

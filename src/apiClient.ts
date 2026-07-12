@@ -333,6 +333,9 @@ function formatHttpError(response: RequestUrlResponse): string {
     if (body.error === "invalid_password") {
       return "Invalid server password. Use the account password from server setup in Pairing password. If you generated a recovery pairing code, paste it into Recovery pairing code.";
     }
+    if (body.error === "invalid_recovery_pairing_code") {
+      return "Invalid or expired recovery pairing code. Generate a new code on the server and try again.";
+    }
     if (body.error === "server_not_configured") {
       return "Server is not configured yet. Run syncctl setup on the server first.";
     }
