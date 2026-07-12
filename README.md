@@ -6,6 +6,139 @@ Server backend: https://github.com/Haniewicz/PrivateSyncServer
 
 The plugin does not use an author-hosted default cloud and does not send data to any external service by default. The user provides the URL of their own server in the plugin settings.
 
+## Requirements
+
+- Obsidian `1.11.4` or newer.
+- A working Private Sync Server reachable over HTTP or HTTPS.
+- A server password configured with `syncctl setup`.
+- HTTPS is recommended, especially when connecting from outside the local network.
+
+## Installation From Release
+
+1. Download these files from GitHub Releases:
+   - `manifest.json`
+   - `main.js`
+   - `styles.css`
+2. Create the plugin folder in your Obsidian vault:
+
+```bash
+mkdir -p /path/to/vault/.obsidian/plugins/private-sync
+```
+
+3. Copy the three release files into that folder.
+4. Enable the plugin in Obsidian under `Settings -> Community plugins`.
+5. In the plugin settings, enter:
+   - `Server URL`, for example `https://your-server.example`,
+   - device name,
+   - device type,
+   - server pairing password.
+6. Click `Pair`.
+7. If this is the first device after `syncctl setup`, it will be paired automatically. Additional devices require approval on an already paired device or a one-time recovery pairing code from the server.
+
+## Developer Build
+
+```bash
+npm install
+npm run build
+```
+
+After the build, copy `manifest.json`, `main.js`, and `styles.css` into the plugin folder in your Obsidian vault.
+
+## How Synchronization Works
+
+- The plugin keeps a local synchronization index in Obsidian plugin data.
+- Changes are detected by SHA-256 hashes, size, and modification time.
+- Uploads happen in batches: operation metadata first, then file contents, then the batch commit.
+- Downloads are based on the local vault's `last_applied_revision`.
+- Each device has its own `device_token`.
+- One local Obsidian vault is permanently linked to one server vault.
+- On the first link, the plugin calculates a local manifest and asks the server to assess connection safety.
+- An empty server vault requires confirmation for `Local -> Remote` upload.
+- A non-empty server vault requires an explicit decision: `Remote -> Local`, `Local -> Remote`, or cancel.
+
+## Private Sync View
+
+The sidebar view contains these tabs:
+
+- `Status` - local file state, queues, conflicts, and ignored files.
+- `Devices` - paired devices, status changes, and device removal.
+- `Vaults` - creating, selecting, renaming, and deleting server vaults.
+- `Plugins` - community plugin catalog detected on other devices.
+- `Requests` - new device approvals and other decisions requiring confirmation.
+- `Conflicts` - file conflicts and tools for manually choosing a version.
+- `History` - file revision history.
+- `Events` - local events and error logs.
+- `Storage` - server-side storage usage preview and cleanup of safe temporary data.
+
+## Community Plugins
+
+Community plugin synchronization is a separate toggle in the Obsidian settings.
+
+Private Sync:
+
+- scans local community plugins,
+- stores their ID, name, version, and author on the server,
+- synchronizes JSON settings files from each plugin folder,
+- skips `manifest.json`,
+- does not synchronize plugin code (`main.js`, `styles.css`),
+- does not synchronize the `private-sync` plugin itself.
+
+In the `Plugins` tab, a missing plugin can be opened in Obsidian's official installer with `Open`. When a plugin is already installed locally, the available actions are `Enable`, `Disable`, `Uninstall`, and `Apply Server Settings`.
+
+## Obsidian Settings
+
+Synchronization of selected Obsidian settings is enabled by default and can be disabled in the plugin settings.
+
+The plugin synchronizes settings for note creators:
+
+- daily notes,
+- templates,
+- unique note creator,
+- Zettelkasten prefixer.
+
+It does not synchronize the workspace or the entire configuration directory blindly.
+
+## Large Files And Attachments
+
+The plugin includes safeguards against clogging synchronization with large files:
+
+- it does not hash a file again if the index has status `synced` and `mtime` and size have not changed,
+- it has an attachment synchronization toggle,
+- it has an automatic file synchronization limit, default `100 MB`,
+- files above the limit are marked as `ignored`,
+- files above the large-file threshold, default `10 MB`, are uploaded and downloaded with chunked transfer,
+- the default chunk size is `5 MB`.
+
+The Obsidian API still requires the plugin to read changed file contents as an `ArrayBuffer` before it can calculate the hash and start the upload. For very large attachments, the automatic synchronization limit remains the best protection.
+
+## Encryption
+
+The plugin includes client-side encryption support for selected notes and encryption key metadata. The encryption password is not the server password. Resetting the server password does not recover or change data encryption keys.
+
+## Mobile
+
+The plugin is prepared for basic operation in Obsidian Mobile:
+
+- it does not use Node.js, Electron, or `FileSystemAdapter` in plugin code,
+- it uses `requestUrl` for HTTP communication,
+- it uses `Vault.configDir` instead of the hardcoded `.obsidian` path,
+- it deletes files through `FileManager.trashFile`,
+- after startup and layout readiness, it runs synchronization,
+- when the app returns to the active view, it reconnects WebSocket and synchronizes,
+- on `focus`, `pageshow`, `online`, and `visibilitychange` to `visible`, it checks changes through the API,
+- when the app goes into the background, it closes WebSocket and does not assume background execution.
+
+On mobile, WebSocket is an auxiliary channel for events, not the source of truth. On every app activation, the plugin fetches state through the HTTP API based on `last_applied_revision`.
+
+## Privacy
+
+- The plugin connects only to the server configured by the user.
+- The plugin requires device pairing and stores a local `device_token`.
+- The plugin reads files from the vault, calculates their hashes, and uploads changed files to the configured server.
+- The plugin downloads changes from the server and writes them to the vault.
+- The plugin does not include telemetry, ads, or external analytics services.
+- The plugin does not send data to any default server hosted by the author.
+
 <details>
 <summary>Polski</summary>
 
@@ -14,8 +147,6 @@ Private Sync Plugin synchronizuje vault Obsidiana z prywatnym backendem Private 
 Backend serwera: https://github.com/Haniewicz/PrivateSyncServer
 
 Plugin nie korzysta z domyslnej chmury autora i nie wysyla danych do zadnej uslugi zewnetrznej. Uzytkownik podaje w ustawieniach adres wlasnego serwera.
-
-</details>
 
 ## Wymagania
 
@@ -149,3 +280,5 @@ WebSocket na mobile jest kanalem pomocniczym dla eventow, nie zrodlem prawdy. Po
 - Plugin pobiera zmiany z serwera i zapisuje je do vaulta.
 - Plugin nie zawiera telemetrii, reklam ani zewnetrznych uslug analitycznych.
 - Plugin nie wysyla danych do zadnego domyslnego serwera autora.
+
+</details>
