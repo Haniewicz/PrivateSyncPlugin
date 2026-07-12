@@ -1,7 +1,29 @@
-import type { DeviceType, PendingOperation, ServerChange } from "./types";
+import { requestUrl, type RequestUrlParam, type RequestUrlResponse } from "obsidian";
+import type {
+  CommunityPluginCatalogEntry,
+  DeviceType,
+  FileHistoryEntry,
+  PendingOperation,
+  RemoteDevice,
+  ServerChange,
+  ServerConflict,
+  ServerRequest,
+  ServerStorageCleanupResult,
+  ServerStorageUsage,
+  ServerVault,
+  StorageCleanupTarget,
+  VaultConnectionAssessment,
+  VaultEncryptionKey
+} from "./types";
+
+type ApiRequestInit = Omit<RequestUrlParam, "url"> & { authenticated?: boolean };
 
 export class ApiClient {
   constructor(private readonly serverUrl: string, private readonly getToken: () => string) {}
+
+  async serverInfo(): Promise<{ protocolVersion: string; serverVersion: string; features: string[] }> {
+    return this.get("/api/v1/server-info");
+  }
 
   async login(password: string): Promise<{ ok: true; initialSetup: boolean }> {
     return this.post("/api/v1/auth/login", { password }, false);
@@ -16,8 +38,64 @@ export class ApiClient {
     return this.post("/api/v1/devices/request", input, false);
   }
 
-  async getVaults(): Promise<{ vaults: Array<{ id: string; name: string; currentRevision: number }> }> {
+  async deviceRequestStatus(
+    requestId: string,
+    password: string
+  ): Promise<
+    | { status: "approved"; deviceId: string; deviceToken: string }
+    | { status: "pending" | "rejected" | "resolved" | "expired" }
+  > {
+    return this.post(`/api/v1/devices/request/${encodeURIComponent(requestId)}/status`, { password }, false);
+  }
+
+  async getVaults(): Promise<{ vaults: ServerVault[] }> {
     return this.get("/api/v1/vaults");
+  }
+
+  async createVault(input: { name: string; id?: string }): Promise<ServerVault> {
+    return this.post("/api/v1/vaults", input);
+  }
+
+  async renameVault(vaultId: string, input: { name: string }): Promise<ServerVault> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/rename`, input);
+  }
+
+  async deleteVault(vaultId: string): Promise<{ ok: true }> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/delete`, {});
+  }
+
+  async getCommunityPlugins(vaultId: string): Promise<{ plugins: CommunityPluginCatalogEntry[] }> {
+    return this.get(`/api/v1/vaults/${encodeURIComponent(vaultId)}/community-plugins`);
+  }
+
+  async updateCommunityPlugins(vaultId: string, plugins: CommunityPluginCatalogEntry[]): Promise<{ ok: true; plugins: CommunityPluginCatalogEntry[] }> {
+    return this.request(`/api/v1/vaults/${encodeURIComponent(vaultId)}/community-plugins`, {
+      method: "PUT",
+      contentType: "application/json",
+      body: JSON.stringify({ plugins })
+    }).then((response) => response.json as { ok: true; plugins: CommunityPluginCatalogEntry[] });
+  }
+
+  async getEncryptionKeys(vaultId: string): Promise<{ active: VaultEncryptionKey | null; keys: VaultEncryptionKey[] }> {
+    return this.get(`/api/v1/vaults/${encodeURIComponent(vaultId)}/encryption-keys`);
+  }
+
+  async createEncryptionKey(vaultId: string, keyCheck: string): Promise<{ id: string; keyCheck: string; active: true; createdAt: string }> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/encryption-keys`, { keyCheck });
+  }
+
+  async assessVaultConnection(
+    vaultId: string,
+    input: { localVaultInstanceId: string; localFileCount: number; localManifestHash: string }
+  ): Promise<VaultConnectionAssessment> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/connection-assessment`, input);
+  }
+
+  async recordSyncState(
+    vaultId: string,
+    input: { localVaultInstanceId: string; localFileCount: number; localManifestHash: string }
+  ): Promise<{ ok: true; revision: number }> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/sync-state`, input);
   }
 
   async getChanges(vaultId: string, since: number): Promise<{ changes: ServerChange[] }> {
@@ -29,14 +107,7 @@ export class ApiClient {
   }
 
   async upload(vaultId: string, batchId: string, operation: PendingOperation, content: ArrayBuffer): Promise<void> {
-    const form = new FormData();
-    form.append("clientChangeId", operation.clientChangeId);
-    form.append("contentHash", operation.contentHash ?? "");
-    form.append("file", new Blob([content]), operation.path);
-    await this.request(`/api/v1/vaults/${encodeURIComponent(vaultId)}/sync-batches/${encodeURIComponent(batchId)}/upload`, {
-      method: "POST",
-      body: form
-    });
+    await this.uploadChunked(vaultId, batchId, operation, content, content.byteLength || 1);
   }
 
   async uploadChunked(
@@ -46,6 +117,7 @@ export class ApiClient {
     content: ArrayBuffer,
     chunkSize: number
   ): Promise<void> {
+    const totalChunks = Math.max(1, Math.ceil(content.byteLength / chunkSize));
     const init = await this.post<{ uploadId: string }>(
       `/api/v1/vaults/${encodeURIComponent(vaultId)}/sync-batches/${encodeURIComponent(batchId)}/chunked-upload`,
       {
@@ -53,16 +125,17 @@ export class ApiClient {
         contentHash: operation.contentHash,
         size: content.byteLength,
         chunkSize,
-        totalChunks: Math.ceil(content.byteLength / chunkSize)
+        totalChunks
       }
     );
-    for (let offset = 0, index = 0; offset < content.byteLength; offset += chunkSize, index += 1) {
+    for (let index = 0; index < totalChunks; index += 1) {
+      const offset = index * chunkSize;
       const chunk = content.slice(offset, Math.min(offset + chunkSize, content.byteLength));
       await this.request(
         `/api/v1/vaults/${encodeURIComponent(vaultId)}/sync-batches/${encodeURIComponent(batchId)}/chunked-upload/${encodeURIComponent(init.uploadId)}/chunks/${index}`,
         {
           method: "PUT",
-          headers: { "content-type": "application/octet-stream" },
+          contentType: "application/octet-stream",
           body: chunk
         }
       );
@@ -81,7 +154,7 @@ export class ApiClient {
     const response = await this.request(
       `/api/v1/vaults/${encodeURIComponent(vaultId)}/files/download?path=${encodeURIComponent(path)}`
     );
-    return response.arrayBuffer();
+    return response.arrayBuffer;
   }
 
   async downloadChunked(vaultId: string, path: string, size: number, chunkSize: number): Promise<ArrayBuffer> {
@@ -95,7 +168,7 @@ export class ApiClient {
           headers: { range: `bytes=${start}-${end}` }
         }
       );
-      const chunk = new Uint8Array(await response.arrayBuffer());
+      const chunk = new Uint8Array(response.arrayBuffer);
       chunks.push(chunk);
       total += chunk.byteLength;
     }
@@ -108,37 +181,170 @@ export class ApiClient {
     return merged.buffer;
   }
 
-  async devices(): Promise<{ devices: unknown[] }> {
+  async devices(): Promise<{ devices: RemoteDevice[] }> {
     return this.get("/api/v1/devices");
   }
 
-  async requests(vaultId: string): Promise<{ requests: unknown[] }> {
+  async updateCurrentDevice(input: { name: string }): Promise<{ ok: true; device: RemoteDevice }> {
+    return this.post("/api/v1/devices/me", input);
+  }
+
+  async revokeDevice(deviceId: string): Promise<{ ok: true }> {
+    return this.post("/api/v1/devices/revoke", { deviceId });
+  }
+
+  async restoreDevice(deviceId: string): Promise<{ ok: true }> {
+    return this.post("/api/v1/devices/restore", { deviceId });
+  }
+
+  async deleteDevice(deviceId: string): Promise<{ ok: true }> {
+    return this.post("/api/v1/devices/delete", { deviceId });
+  }
+
+  async approveDeviceRequest(input: {
+    requestId: string;
+    deviceName: string;
+    deviceType: DeviceType;
+  }): Promise<{ status: "approved"; deviceId: string; deviceToken: string }> {
+    return this.post("/api/v1/devices/approve", input);
+  }
+
+  async requests(vaultId: string): Promise<{ requests: ServerRequest[] }> {
     return this.get(`/api/v1/vaults/${encodeURIComponent(vaultId)}/requests`);
   }
 
-  private get<T>(path: string): Promise<T> {
-    return this.request(path).then((response) => response.json() as Promise<T>);
+  async resolveRequest(vaultId: string, requestId: string, status: "approved" | "rejected" | "resolved", decision: unknown): Promise<{ ok: true; batch?: unknown }> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/requests/${encodeURIComponent(requestId)}/resolve`, {
+      status,
+      decision
+    });
   }
 
-  private post<T>(path: string, body: unknown, authenticated = true): Promise<T> {
-    return this.request(path, {
+  async conflicts(vaultId: string): Promise<{ conflicts: ServerConflict[] }> {
+    return this.get(`/api/v1/vaults/${encodeURIComponent(vaultId)}/conflicts`);
+  }
+
+  async resolveConflict(vaultId: string, conflictId: string, status: "resolved" | "cancelled", decision: unknown): Promise<{ ok: true }> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/conflicts/${encodeURIComponent(conflictId)}/resolve`, {
+      status,
+      decision
+    });
+  }
+
+  async history(vaultId: string, path: string): Promise<{ history: FileHistoryEntry[] }> {
+    return this.get(`/api/v1/vaults/${encodeURIComponent(vaultId)}/files/history?path=${encodeURIComponent(path)}`);
+  }
+
+  async downloadRevision(vaultId: string, revisionId: number): Promise<ArrayBuffer> {
+    const response = await this.request(
+      `/api/v1/vaults/${encodeURIComponent(vaultId)}/files/revisions/${encodeURIComponent(String(revisionId))}/download`
+    );
+    return response.arrayBuffer;
+  }
+
+  async restoreRevision(vaultId: string, revisionId: number): Promise<{ ok: true; revision: number; path: string }> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/files/revisions/${encodeURIComponent(String(revisionId))}/restore`, {});
+  }
+
+  async encryptRevision(
+    vaultId: string,
+    revisionId: number,
+    input: {
+      contentHash: string;
+      size: number;
+      plaintextHash: string;
+      plaintextSize: number;
+      encryptionKeyId: string;
+      content: ArrayBuffer;
+    }
+  ): Promise<{ ok: true; contentHash: string; size: number; encryptionKeyId: string }> {
+    return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/files/revisions/${encodeURIComponent(String(revisionId))}/encrypt`, {
+      contentHash: input.contentHash,
+      size: input.size,
+      plaintextHash: input.plaintextHash,
+      plaintextSize: input.plaintextSize,
+      encryptionKeyId: input.encryptionKeyId,
+      contentBase64: base64Encode(new Uint8Array(input.content))
+    });
+  }
+
+  async storageUsage(): Promise<ServerStorageUsage> {
+    return this.get("/api/v1/storage/usage");
+  }
+
+  async cleanupStorage(targets: StorageCleanupTarget[]): Promise<ServerStorageCleanupResult> {
+    return this.post("/api/v1/storage/cleanup", { targets });
+  }
+
+  private async get<T>(path: string): Promise<T> {
+    const response = await this.request(path);
+    return response.json as T;
+  }
+
+  private async post<T>(path: string, body: unknown, authenticated = true): Promise<T> {
+    const response = await this.request(path, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      contentType: "application/json",
       body: JSON.stringify(body),
       authenticated
-    }).then((response) => response.json() as Promise<T>);
+    });
+    return response.json as T;
   }
 
-  private async request(path: string, init: RequestInit & { authenticated?: boolean } = {}): Promise<Response> {
-    const headers = new Headers(init.headers);
+  private async request(path: string, init: ApiRequestInit = {}): Promise<RequestUrlResponse> {
+    const headers: Record<string, string> = { ...(init.headers ?? {}) };
     if (init.authenticated !== false) {
       const token = this.getToken();
-      if (token) headers.set("authorization", `Bearer ${token}`);
+      if (token) headers.authorization = `Bearer ${token}`;
     }
-    const response = await fetch(`${this.serverUrl.replace(/\/$/, "")}${path}`, { ...init, headers });
-    if (!response.ok) {
-      throw new Error(`Server returned ${response.status}: ${await response.text()}`);
+    const { authenticated, ...requestInit } = init;
+    const url = `${this.serverUrl.replace(/\/$/, "")}${path}`;
+    let response: RequestUrlResponse;
+    try {
+      response = await requestUrl({
+        ...requestInit,
+        url,
+        headers,
+        throw: false
+      });
+    } catch (error) {
+      throw new Error(`Cannot reach Private Sync server at ${this.serverUrl}: ${formatRequestError(error)}`);
+    }
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(formatHttpError(response));
     }
     return response;
   }
+}
+
+function base64Encode(bytes: Uint8Array): string {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.slice(index, index + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function formatHttpError(response: RequestUrlResponse): string {
+  const text = response.text?.trim();
+  if (!text) return `Server returned HTTP ${response.status}.`;
+  try {
+    const body = JSON.parse(text) as { error?: string; message?: string };
+    if (body.error === "invalid_password") {
+      return "Invalid server password. Use the account password from server setup in Pairing password. If you generated a recovery pairing code, paste it into Recovery pairing code.";
+    }
+    if (body.error === "invalid_recovery_pairing_code") {
+      return "Invalid or expired recovery pairing code. Generate a new code on the server and try again.";
+    }
+    if (body.error === "server_not_configured") {
+      return "Server is not configured yet. Run syncctl setup on the server first.";
+    }
+    return body.error || body.message ? `Server returned HTTP ${response.status}: ${body.error ?? body.message}` : `Server returned HTTP ${response.status}.`;
+  } catch {
+    return `Server returned HTTP ${response.status}: ${text.slice(0, 200)}`;
+  }
+}
+
+function formatRequestError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

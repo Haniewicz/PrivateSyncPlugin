@@ -1,8 +1,15 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, Modal, Notice, PluginSettingTab, Setting, type DropdownComponent } from "obsidian";
 import type PrivateSyncPlugin from "./plugin";
-import type { DeviceType } from "./types";
+import type { DeviceType, ServerVault } from "./types";
 
 export class PrivateSyncSettingTab extends PluginSettingTab {
+  private pairingPassword = "";
+  private recoveryPairingCode = "";
+  private encryptionUnlockPassphrase = "";
+  private newVaultName = "";
+  private vaultNames = new Map<string, string>();
+  private deviceNameSyncTimer: number | null = null;
+
   constructor(app: App, private readonly plugin: PrivateSyncPlugin) {
     super(app, plugin);
   }
@@ -10,6 +17,7 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+    if (!this.pairingPassword) this.pairingPassword = this.plugin.settings.password;
 
     new Setting(containerEl)
       .setName("Server URL")
@@ -29,6 +37,7 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
         text.setValue(this.plugin.settings.deviceName).onChange(async (value) => {
           this.plugin.settings.deviceName = value;
           await this.plugin.saveSettings();
+          this.scheduleDeviceNameSync(value.trim());
         })
       );
 
@@ -46,8 +55,9 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
       .setName("Pairing password")
       .addText((text) =>
         text
-          .setValue(this.plugin.settings.password)
+          .setValue(this.pairingPassword)
           .onChange(async (value) => {
+            this.pairingPassword = value;
             this.plugin.settings.password = value;
             await this.plugin.saveSettings();
           })
@@ -58,12 +68,60 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Pair this device")
+      .setName("Recovery pairing code")
+      .setDesc("Optional one-time code from syncctl pairing-code create. It does not replace the server password.")
+      .addText((text) =>
+        text
+          .setPlaceholder("optional")
+          .setValue(this.recoveryPairingCode)
+          .onChange((value) => {
+            this.recoveryPairingCode = value.trim();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Test server password")
+      .setDesc("Checks this Server URL and the current Pairing password without pairing a device.")
       .addButton((button) =>
-        button.setButtonText("Pair").setCta().onClick(async () => {
-          await this.plugin.syncEngine.pairDevice();
+        button.setButtonText("Test").setClass("private-sync-button").setClass("private-sync-button-subtle").onClick(async () => {
+          button.setDisabled(true);
+          button.setButtonText("Testing...");
+          try {
+            await this.testPassword();
+            new Notice("Private Sync: server password is valid.", 8000);
+          } catch (error) {
+            new Notice(`Private Sync password test failed: ${errorMessage(error)}`, 10000);
+          } finally {
+            button.setDisabled(false);
+            button.setButtonText("Test");
+          }
         })
       );
+
+    new Setting(containerEl)
+      .setName("Pair this device")
+      .addButton((button) =>
+        button.setButtonText("Pair").setClass("private-sync-button").setClass("private-sync-button-primary").setCta().onClick(async () => {
+          button.setDisabled(true);
+          button.setButtonText("Pairing...");
+          try {
+            await this.plugin.syncEngine.pairDevice({
+              password: this.pairingPassword,
+              recoveryPairingCode: this.recoveryPairingCode || undefined
+            });
+            this.pairingPassword = "";
+            this.recoveryPairingCode = "";
+            this.display();
+          } catch (error) {
+            new Notice(`Private Sync pairing failed: ${errorMessage(error)}`, 10000);
+          } finally {
+            button.setDisabled(false);
+            button.setButtonText("Pair");
+          }
+        })
+      );
+
+    this.renderVaultSettings(containerEl);
 
     new Setting(containerEl)
       .setName("Auto sync")
@@ -82,6 +140,30 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
+
+    new Setting(containerEl)
+      .setName("Sync Obsidian settings")
+      .setDesc("Synchronizes note creator settings only, including daily notes, templates, unique note creator, and Zettelkasten prefixer paths/formats.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.syncObsidianSettings).onChange(async (value) => {
+          this.plugin.settings.syncObsidianSettings = value;
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Sync community plugins")
+      .setDesc("Shares a catalog of installed community plugins and JSON settings files. Plugin code is installed from Obsidian, then settings can be applied from Private Sync.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.syncCommunityPlugins).setDisabled(!this.plugin.settings.syncObsidianSettings).onChange(async (value) => {
+          this.plugin.settings.syncCommunityPlugins = value;
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      );
+
+    this.renderEncryptionSettings(containerEl);
 
     new Setting(containerEl)
       .setName("Max automatic file size")
@@ -113,4 +195,351 @@ export class PrivateSyncSettingTab extends PluginSettingTab {
         })
       );
   }
+
+  private async testPassword(): Promise<void> {
+    if (!this.plugin.settings.serverUrl.trim()) {
+      throw new Error("Enter the Private Sync server URL first.");
+    }
+    if (!this.pairingPassword.trim()) {
+      throw new Error("Enter the pairing password first.");
+    }
+    await this.plugin.api.serverInfo();
+    await this.plugin.api.login(this.pairingPassword);
+  }
+
+  private scheduleDeviceNameSync(name: string): void {
+    if (this.deviceNameSyncTimer !== null) {
+      window.clearTimeout(this.deviceNameSyncTimer);
+      this.deviceNameSyncTimer = null;
+    }
+    if (!this.plugin.settings.deviceToken) return;
+    this.deviceNameSyncTimer = window.setTimeout(() => {
+      this.deviceNameSyncTimer = null;
+      this.syncDeviceName(name).catch((error) => {
+        new Notice(`Private Sync: device name was saved locally but not on server: ${errorMessage(error)}`, 10000);
+      });
+    }, 800);
+  }
+
+  private async syncDeviceName(name: string): Promise<void> {
+    if (!this.plugin.settings.deviceToken) return;
+    if (name !== this.plugin.settings.deviceName.trim()) return;
+    if (!name) throw new Error("Device name cannot be empty.");
+    await this.plugin.api.updateCurrentDevice({ name });
+    this.plugin.refreshView();
+  }
+
+  private renderVaultSettings(containerEl: HTMLElement): void {
+    new Setting(containerEl)
+      .setName("Server vault")
+      .setDesc(this.plugin.settings.vaultLinked ? `Linked to ${formatVaultLabel(this.plugin.settings.vaultName, this.plugin.settings.vaultId)}` : "Choose the server vault before linking this local vault.")
+      .addDropdown((dropdown) => {
+        dropdown.addOption(this.plugin.settings.vaultId, this.plugin.settings.vaultId);
+        dropdown.setValue(this.plugin.settings.vaultId);
+        dropdown.setDisabled(this.plugin.settings.vaultLinked);
+        dropdown.onChange(async (value) => {
+          try {
+            await this.selectVault(value);
+          } catch (error) {
+            new Notice(`Private Sync: cannot select vault: ${errorMessage(error)}`, 10000);
+          } finally {
+            this.display();
+          }
+        });
+        this.loadVaultOptions(dropdown).catch((error) => {
+          if (this.plugin.settings.deviceToken) new Notice(`Private Sync: cannot load vaults: ${errorMessage(error)}`, 10000);
+        });
+      })
+      .addButton((button) =>
+        button.setButtonText("Refresh").setClass("private-sync-button").setClass("private-sync-button-subtle").onClick(() => {
+          this.display();
+        })
+      )
+      .addButton((button) =>
+        button
+          .setButtonText(this.plugin.settings.vaultLinked ? "Linked" : "Link")
+          .setClass("private-sync-button")
+          .setClass("private-sync-button-primary")
+          .setCta()
+          .setDisabled(!this.plugin.settings.deviceToken || this.plugin.settings.vaultLinked)
+          .onClick(async () => {
+            button.setDisabled(true);
+            button.setButtonText("Checking...");
+            try {
+              await this.plugin.syncEngine.finishInitialVaultConnection();
+              this.display();
+            } catch (error) {
+              new Notice(`Private Sync: cannot link vault: ${errorMessage(error)}`, 10000);
+            } finally {
+              button.setButtonText(this.plugin.settings.vaultLinked ? "Linked" : "Link");
+              button.setDisabled(!this.plugin.settings.deviceToken || this.plugin.settings.vaultLinked);
+            }
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Create server vault")
+      .setDesc("Creates an empty server vault, selects it, and starts the first-link safety check.")
+      .addText((text) =>
+        text
+          .setPlaceholder("Vault name")
+          .setValue(this.newVaultName)
+          .onChange((value) => {
+            this.newVaultName = value;
+          })
+      )
+      .addButton((button) =>
+        button.setButtonText("Create").setClass("private-sync-button").setClass("private-sync-button-primary").setDisabled(!this.plugin.settings.deviceToken || this.plugin.settings.vaultLinked).onClick(async () => {
+          button.setDisabled(true);
+          button.setButtonText("Creating...");
+          try {
+            const vault = await this.createVault();
+            this.newVaultName = "";
+            new Notice(
+              this.plugin.settings.vaultLinked ? `Private Sync: created and linked vault ${vault.name}.` : `Private Sync: created vault ${vault.name}.`,
+              8000
+            );
+            this.display();
+          } catch (error) {
+            new Notice(`Private Sync: cannot create vault: ${errorMessage(error)}`, 10000);
+          } finally {
+            button.setDisabled(false);
+            button.setButtonText("Create");
+          }
+        })
+      );
+  }
+
+  private renderEncryptionSettings(containerEl: HTMLElement): void {
+    new Setting(containerEl).setName("End-to-end encryption").setHeading();
+
+    new Setting(containerEl)
+      .setName("Encrypt synced file contents")
+      .setDesc("Encrypts synced file blobs before upload. The server stores ciphertext and cannot recover the passphrase.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.encryptionEnabled)
+          .setDisabled(!this.plugin.settings.encryptionKeyCheck)
+          .onChange(async (value) => {
+            if (value && !this.plugin.settings.encryptionKeyCheck) {
+              new Notice("Private Sync: set an encryption passphrase first.", 8000);
+              this.display();
+              return;
+            }
+            this.plugin.settings.encryptionEnabled = value;
+            await this.plugin.saveSettings();
+            this.display();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Remember encryption passphrase locally")
+      .setDesc("Stores the passphrase in Obsidian SecretStorage on this device so encryption unlocks automatically after restart.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.rememberEncryptionPassphrase).onChange(async (value) => {
+          await this.plugin.setRememberEncryptionPassphrase(value);
+          this.display();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName(this.plugin.settings.encryptionKeyCheck ? "Unlock vault encryption" : "Set vault encryption passphrase")
+      .setDesc(
+        this.plugin.isEncryptionUnlocked()
+          ? "Encryption is unlocked for this session."
+          : this.plugin.settings.rememberEncryptionPassphrase
+            ? "The passphrase will be saved locally after it is used successfully."
+            : "Enter the vault encryption passphrase for this session."
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("Passphrase")
+          .setValue(this.encryptionUnlockPassphrase)
+          .setDisabled(this.plugin.isEncryptionUnlocked())
+          .onChange((value) => {
+            this.encryptionUnlockPassphrase = value;
+          })
+      )
+      .addButton((button) =>
+        button
+          .setButtonText(this.plugin.isEncryptionUnlocked() ? "Lock" : this.plugin.settings.encryptionKeyCheck ? "Unlock" : "Set up")
+          .setClass("private-sync-button")
+          .setClass(this.plugin.isEncryptionUnlocked() ? "private-sync-button-subtle" : "private-sync-button-primary")
+          .onClick(async () => {
+            if (this.plugin.isEncryptionUnlocked()) {
+              this.plugin.lockEncryption();
+              this.display();
+              return;
+            }
+            button.setDisabled(true);
+            button.setButtonText(this.plugin.settings.encryptionKeyCheck ? "Unlocking..." : "Saving...");
+            try {
+              const hadEncryptionPassphrase = Boolean(this.plugin.settings.encryptionKeyCheck);
+              if (this.plugin.settings.encryptionKeyCheck) {
+                await this.plugin.unlockEncryption(this.encryptionUnlockPassphrase);
+              } else {
+                await this.plugin.setEncryptionPassphrase(this.encryptionUnlockPassphrase);
+              }
+              this.encryptionUnlockPassphrase = "";
+              new Notice(hadEncryptionPassphrase ? "Private Sync: encryption unlocked." : "Private Sync: encryption passphrase saved and unlocked.", 8000);
+              this.display();
+            } catch (error) {
+              new Notice(`Private Sync encryption failed: ${errorMessage(error)}`, 10000);
+            } finally {
+              button.setDisabled(false);
+              button.setButtonText(this.plugin.settings.encryptionKeyCheck ? "Unlock" : "Set up");
+            }
+          })
+      )
+      .then((setting) => {
+        const input = setting.controlEl.querySelector("input");
+        if (input) input.type = "password";
+      });
+
+    new Setting(containerEl)
+      .setName("Change encryption passphrase")
+      .setDesc("Changing the passphrase re-uploads active encrypted files with the new server key. Old history can still be opened with the old passphrase.")
+      .addButton((button) =>
+        button
+          .setButtonText("Change...")
+          .setClass("private-sync-button")
+          .setClass("private-sync-button-subtle")
+          .setDisabled(!this.plugin.settings.encryptionKeyCheck || !this.plugin.isEncryptionUnlocked())
+          .onClick(() => {
+            new EncryptionPassphraseChangeModal(this.plugin, () => this.display()).open();
+          })
+      );
+  }
+
+  private async loadVaultOptions(dropdown: DropdownComponent): Promise<void> {
+    if (!this.plugin.settings.deviceToken) return;
+    const response = await this.plugin.api.getVaults();
+    dropdown.selectEl.replaceChildren();
+    const vaults = response.vaults.sort((a, b) => a.name.localeCompare(b.name));
+    this.vaultNames = new Map(vaults.map((vault) => [vault.id, vault.name]));
+    const selectedVault = vaults.find((vault) => vault.id === this.plugin.settings.vaultId);
+    if (selectedVault && this.plugin.settings.vaultName !== selectedVault.name) {
+      this.plugin.settings.vaultName = selectedVault.name;
+      await this.plugin.saveSettings();
+      this.plugin.refreshView();
+    }
+    if (!vaults.some((vault) => vault.id === this.plugin.settings.vaultId)) {
+      dropdown.addOption(this.plugin.settings.vaultId, this.plugin.settings.vaultId);
+    }
+    for (const vault of vaults) {
+      dropdown.addOption(vault.id, `${vault.name} (${vault.id})`);
+    }
+    dropdown.setValue(this.plugin.settings.vaultId);
+  }
+
+  private async createVault(): Promise<ServerVault> {
+    const name = this.newVaultName.trim();
+    if (!name) throw new Error("Enter a vault name first.");
+    if (!this.plugin.settings.deviceToken) throw new Error("Pair this device before creating server vaults.");
+    if (this.plugin.settings.vaultLinked) throw new Error("This local vault is already linked to a server vault.");
+    const vault = await this.plugin.api.createVault({ name });
+    this.plugin.settings.vaultId = vault.id;
+    this.plugin.settings.vaultName = vault.name;
+    await this.plugin.saveSettings();
+    await this.plugin.syncEngine.finishInitialVaultConnection();
+    return vault;
+  }
+
+  private async selectVault(vaultId: string): Promise<void> {
+    if (!vaultId || vaultId === this.plugin.settings.vaultId) return;
+    if (this.plugin.settings.vaultLinked) throw new Error("This local vault is already linked to a server vault.");
+    this.plugin.settings.vaultId = vaultId;
+    this.plugin.settings.vaultName = this.vaultNames.get(vaultId) ?? "";
+    await this.plugin.saveSettings();
+    this.plugin.refreshView();
+  }
+}
+
+class EncryptionPassphraseChangeModal extends Modal {
+  private passphrase = "";
+  private repeatedPassphrase = "";
+  private submitButton: HTMLButtonElement | null = null;
+
+  constructor(
+    private readonly plugin: PrivateSyncPlugin,
+    private readonly onChanged: () => void
+  ) {
+    super(plugin.app);
+  }
+
+  onOpen(): void {
+    this.contentEl.empty();
+    this.contentEl.addClass("private-sync-vault-modal");
+    this.contentEl.createEl("h2", { text: "Change encryption passphrase" });
+    this.contentEl.createDiv({
+      text: "Changing the passphrase re-uploads active encrypted files with the new server key.",
+      cls: "private-sync-muted"
+    });
+
+    const passphraseInput = this.contentEl.createEl("input", {
+      type: "password",
+      placeholder: "New passphrase",
+      cls: "private-sync-modal-input"
+    });
+    passphraseInput.oninput = () => {
+      this.passphrase = passphraseInput.value;
+      this.updateState();
+    };
+
+    const repeatedInput = this.contentEl.createEl("input", {
+      type: "password",
+      placeholder: "Repeat new passphrase",
+      cls: "private-sync-modal-input"
+    });
+    repeatedInput.oninput = () => {
+      this.repeatedPassphrase = repeatedInput.value;
+      this.updateState();
+    };
+    repeatedInput.onkeydown = (event) => {
+      if (event.key === "Enter") this.submit();
+    };
+
+    const actions = this.contentEl.createDiv({ cls: "private-sync-modal-actions" });
+    actions.createEl("button", { text: "Cancel", cls: "private-sync-button private-sync-button-subtle" }).onclick = () => this.close();
+    this.submitButton = actions.createEl("button", { text: "Change", cls: "private-sync-button private-sync-button-primary" });
+    this.submitButton.onclick = () => this.submit();
+    this.updateState();
+    passphraseInput.focus();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+    this.passphrase = "";
+    this.repeatedPassphrase = "";
+  }
+
+  private updateState(): void {
+    if (!this.submitButton) return;
+    this.submitButton.disabled = this.passphrase.trim().length === 0 || this.repeatedPassphrase.trim().length === 0 || this.passphrase !== this.repeatedPassphrase;
+  }
+
+  private async submit(): Promise<void> {
+    if (!this.submitButton || this.submitButton.disabled) return;
+    this.submitButton.disabled = true;
+    this.submitButton.textContent = "Changing...";
+    try {
+      await this.plugin.setEncryptionPassphrase(this.passphrase);
+      new Notice("Private Sync: encryption passphrase changed and unlocked.", 10000);
+      this.onChanged();
+      this.close();
+    } catch (error) {
+      new Notice(`Private Sync passphrase change failed: ${errorMessage(error)}`, 10000);
+      this.submitButton.disabled = false;
+      this.submitButton.textContent = "Change";
+      this.updateState();
+    }
+  }
+}
+
+function formatVaultLabel(name: string, id: string): string {
+  return name ? `${name} (${id})` : id;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

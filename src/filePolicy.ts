@@ -3,13 +3,22 @@ import type { PluginSettings } from "./types";
 
 const MARKDOWN_EXTENSIONS = new Set(["md", "markdown", "txt", "canvas", "json"]);
 
+export function isTextLikePath(path: string): boolean {
+  const extension = path.split(".").pop()?.toLowerCase() ?? "";
+  return MARKDOWN_EXTENSIONS.has(extension);
+}
+
 export function isTextLikeFile(file: TFile): boolean {
-  return MARKDOWN_EXTENSIONS.has(file.extension.toLowerCase());
+  return isTextLikePath(file.path);
+}
+
+export function shouldAutoSyncPath(path: string, size: number, settings: PluginSettings): boolean {
+  if (!settings.syncAttachments && !isTextLikePath(path)) return false;
+  return size <= mb(settings.maxAutoSyncFileSizeMb);
 }
 
 export function shouldAutoSync(file: TFile, settings: PluginSettings): boolean {
-  if (!settings.syncAttachments && !isTextLikeFile(file)) return false;
-  return file.stat.size <= mb(settings.maxAutoSyncFileSizeMb);
+  return shouldAutoSyncPath(file.path, file.stat.size, settings);
 }
 
 export function shouldUseChunkedTransfer(size: number, settings: PluginSettings): boolean {
