@@ -498,10 +498,17 @@ export class SyncEngine {
     }
     const result = await this.api.commit(this.plugin.settings.vaultId, batchId);
     if (result.status === "committed" && result.revision !== undefined) {
+      const committedRevisions = new Map(result.fileRevisions?.map((entry) => [entry.path, entry.fileRevisionId]) ?? []);
       for (const operation of batchOperations) {
         const record = index.files[operation.path];
         if (record) {
-          record.serverRevisionId = result.revision;
+          const committedPath = operation.path;
+          let fileRevisionId = committedRevisions.get(committedPath);
+          if (fileRevisionId === undefined) {
+            const history = await this.api.history(this.plugin.settings.vaultId, committedPath);
+            fileRevisionId = history.history[0]?.id ?? null;
+          }
+          record.serverRevisionId = fileRevisionId;
           record.status = "synced";
           record.wasSynced = true;
           if (operation.type === "delete") {

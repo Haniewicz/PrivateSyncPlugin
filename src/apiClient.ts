@@ -146,7 +146,13 @@ export class ApiClient {
     );
   }
 
-  async commit(vaultId: string, batchId: string): Promise<{ status: string; revision?: number; conflicts?: string[]; requestId?: string }> {
+  async commit(vaultId: string, batchId: string): Promise<{
+    status: string;
+    revision?: number;
+    fileRevisions?: Array<{ path: string; fileRevisionId: number | null }>;
+    conflicts?: string[];
+    requestId?: string;
+  }> {
     return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/sync-batches/${encodeURIComponent(batchId)}/commit`, {});
   }
 
