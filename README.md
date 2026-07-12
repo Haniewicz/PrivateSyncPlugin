@@ -1,6 +1,39 @@
 # Private Sync Plugin
 
-Pierwotna wersja pluginu Obsidiana do prywatnego serwera synchronizacji.
+Private Sync Plugin synchronizuje vault Obsidiana z prywatnym backendem Private Sync Server.
+
+Backend serwera: https://github.com/Haniewicz/PrivateSyncServer
+
+Plugin nie korzysta z domyslnej chmury autora i nie wysyla danych do zadnej uslugi zewnetrznej. Uzytkownik podaje w ustawieniach adres wlasnego serwera.
+
+## Wymagania
+
+- Obsidian `1.11.4` lub nowszy.
+- Dzialajacy Private Sync Server dostepny przez HTTP albo HTTPS.
+- Haslo serwera ustawione przez `syncctl setup`.
+- Zalecane HTTPS, szczegolnie gdy laczysz sie spoza sieci lokalnej.
+
+## Instalacja z release
+
+1. Pobierz z GitHub Releases pliki:
+   - `manifest.json`
+   - `main.js`
+   - `styles.css`
+2. W vaultcie Obsidiana utworz folder pluginu:
+
+```bash
+mkdir -p /sciezka/do/vaulta/.obsidian/plugins/private-sync
+```
+
+3. Skopiuj trzy pliki release do tego folderu.
+4. W Obsidianie wlacz plugin w `Settings -> Community plugins`.
+5. W ustawieniach pluginu wpisz:
+   - `Server URL`, np. `https://twoj-serwer.example`,
+   - nazwe urzadzenia,
+   - typ urzadzenia,
+   - haslo parowania serwera.
+6. Kliknij `Pair`.
+7. Jesli to pierwsze urzadzenie po `syncctl setup`, zostanie sparowane automatycznie. Kolejne urzadzenia wymagaja akceptacji na juz sparowanym urzadzeniu albo jednorazowego recovery pairing code z serwera.
 
 ## Uruchomienie developerskie
 
@@ -9,73 +42,99 @@ npm install
 npm run build
 ```
 
-Skopiuj `manifest.json`, `main.js` i `styles.css` do folderu pluginu w vaultcie Obsidiana.
+Po buildzie skopiuj `manifest.json`, `main.js` i `styles.css` do folderu pluginu w vaultcie Obsidiana.
 
-## MVP
+## Jak dziala synchronizacja
 
-- ustawienia adresu serwera, hasła do parowania, nazwy i typu urządzenia,
-- pierwsze parowanie urządzenia i zapis `device_token` w ustawieniach pluginu,
-- lokalny indeks plików w `data.json`,
-- wykrywanie zmian po hashach SHA-256,
-- offline queue z `client_change_id`,
-- batch upload do serwera,
-- pobieranie zmian od `last_applied_revision`,
-- wybór albo tworzenie server-vaulta przed trwałym powiązaniem lokalnego vaulta,
-- opcjonalna synchronizacja wybranych ustawień Obsidiana oraz katalogu community pluginów z ich ustawieniami JSON,
-- widok boczny: Status, Urządzenia, Vaults, Plugins, Konflikty, Historia.
+- Plugin utrzymuje lokalny indeks synchronizacji w danych pluginu Obsidiana.
+- Zmiany wykrywane sa po hashach SHA-256, rozmiarze i czasie modyfikacji.
+- Upload idzie batchami: najpierw metadane operacji, potem tresc plikow, a na koncu commit batcha.
+- Pobieranie zmian opiera sie o `last_applied_revision` lokalnego vaulta.
+- Kazde urzadzenie ma osobny `device_token`.
+- Jeden lokalny vault Obsidiana jest trwale powiazany z jednym server-vaultem.
+- Przy pierwszym powiazaniu plugin liczy lokalny manifest i pyta serwer o ocene bezpieczenstwa polaczenia.
+- Pusty server-vault wymaga potwierdzenia uploadu `Local -> Remote`.
+- Niepusty server-vault wymaga jawnej decyzji: `Remote -> Local`, `Local -> Remote` albo anulowanie.
 
-Na tym etapie lokalny indeks używa trwałego storage Obsidiana. SQLite warto dodać jako kolejny krok dla dużych vaultów.
+## Widok Private Sync
 
-Każdy lokalny vault Obsidiana wskazuje jeden stały server-vault. Po powiązaniu lokalnego vaulta wybór server-vaulta jest blokowany, żeby uniknąć przypadkowego mieszania lub nadpisywania plików między różnymi vaultami.
+Widok boczny zawiera zakladki:
 
-Przy pierwszym powiązaniu plugin liczy lokalny manifest plików i pyta serwer o ocenę bezpieczeństwa. Pusty server-vault wymaga potwierdzenia uploadu `Local -> Remote`. Niepusty server-vault pokazuje ocenę ryzyka i wymaga jawnej decyzji: `Remote -> Local`, `Local -> Remote` albo anulowanie. Po powiązaniu normalny sync działa już tylko z tym jednym server-vaultem.
+- `Status` - stan lokalnych plikow, kolejki, konfliktow i ignorowanych plikow.
+- `Devices` - sparowane urzadzenia, zmiana statusu i usuwanie urzadzen.
+- `Vaults` - tworzenie, wybor, zmiana nazwy i usuwanie server-vaultow.
+- `Plugins` - katalog community pluginow wykrytych na innych urzadzeniach.
+- `Requests` - akceptacje nowych urzadzen i inne decyzje wymagajace potwierdzenia.
+- `Conflicts` - konflikty plikow i narzedzia recznego wyboru wersji.
+- `History` - historia rewizji pliku.
+- `Events` - lokalne zdarzenia i logi bledow.
+- `Storage` - podglad uzycia storage po stronie serwera i czyszczenie bezpiecznych danych tymczasowych.
 
-Synchronizacja ustawień Obsidiana jest włączona domyślnie i może zostać wyłączona w ustawieniach pluginu. Plugin synchronizuje tylko ustawienia kreatorów notatek: daily notes, templates, unique note creator i Zettelkasten prefixer. Dzięki temu przenoszone są m.in. formaty nazw nowych notatek oraz ścieżki template i folderów docelowych. Nie synchronizuje workspace ani całego katalogu konfiguracji w ciemno.
+## Community plugins
 
-Synchronizacja community pluginów jest osobnym przełącznikiem pod ustawieniami Obsidiana. Private Sync nie kopiuje kodu pluginów (`main.js`, `styles.css`) ani nie instaluje ich automatycznie. Każde urządzenie skanuje lokalne community pluginy, dopisuje ich ID, nazwę i wersję do katalogu na serwerze oraz wysyła JSON-owe pliki ustawień z folderu danego pluginu, z pominięciem `manifest.json`.
+Synchronizacja community pluginow jest osobnym przelacznikiem pod ustawieniami Obsidiana.
 
-W widoku `Plugins` użytkownik widzi pluginy wykryte na innych urządzeniach. Brakujący plugin można otworzyć w oficjalnym installerze Obsidiana, a po jego instalacji kliknąć `Apply Server Settings`, żeby wgrać zapisane ustawienia do odpowiedniego folderu z pluginami Obsidiana.
+Private Sync:
 
-## Duże pliki i załączniki
+- skanuje lokalne community pluginy,
+- zapisuje na serwerze ich ID, nazwe, wersje i autora,
+- synchronizuje JSON-owe pliki ustawien z folderu danego pluginu,
+- pomija `manifest.json`,
+- nie synchronizuje kodu pluginow (`main.js`, `styles.css`),
+- nie synchronizuje samego pluginu `private-sync`.
 
-Plugin ma podstawowe zabezpieczenia przed zapychaniem synchronizacji dużymi plikami:
+W zakladce `Plugins` brakujacy plugin mozna otworzyc w oficjalnym installerze Obsidiana przez `Open`. Gdy plugin jest juz lokalnie zainstalowany, widoczne sa akcje `Enable`, `Disable`, `Uninstall` oraz `Apply Server Settings`.
 
-- nie hashuje ponownie pliku, jeśli w indeksie ma status `synced`, a `mtime` i rozmiar nie uległy zmianie,
-- ma przełącznik synchronizacji załączników,
-- ma limit automatycznej synchronizacji pliku, domyślnie `100 MB`,
-- pliki powyżej limitu są oznaczane jako `ignored` i nie trafiają automatycznie do kolejki uploadu,
-- pliki powyżej progu dużego pliku, domyślnie `10 MB`, są wysyłane i pobierane przez chunked transfer,
-- domyślny chunk ma `5 MB`.
+## Ustawienia Obsidiana
 
-Aktualne limity są dostępne w ustawieniach pluginu:
+Synchronizacja wybranych ustawien Obsidiana jest wlaczona domyslnie i moze zostac wylaczona w ustawieniach pluginu.
 
-- `Sync attachments`,
-- `Max automatic file size`,
-- `Large file threshold`,
-- `Chunk size`.
+Plugin synchronizuje ustawienia kreatorow notatek:
 
-Ważne ograniczenie: API Obsidiana nadal wymaga od pluginu odczytania zawartości zmienionego pliku jako `ArrayBuffer`, zanim można policzyć hash i rozpocząć upload. Chunked transfer zmniejsza ryzyko po stronie sieci i serwera, ale nie jest jeszcze pełnym streamingiem z dysku lokalnego. Dla bardzo dużych załączników najlepszą ochroną pozostaje limit automatycznej synchronizacji.
+- daily notes,
+- templates,
+- unique note creator,
+- Zettelkasten prefixer.
+
+Nie synchronizuje workspace ani calego katalogu konfiguracji w ciemno.
+
+## Duze pliki i zalaczniki
+
+Plugin ma zabezpieczenia przed zapychaniem synchronizacji duzymi plikami:
+
+- nie hashuje ponownie pliku, jesli indeks ma status `synced`, a `mtime` i rozmiar nie ulegly zmianie,
+- ma przelacznik synchronizacji zalacznikow,
+- ma limit automatycznej synchronizacji pliku, domyslnie `100 MB`,
+- pliki powyzej limitu sa oznaczane jako `ignored`,
+- pliki powyzej progu duzego pliku, domyslnie `10 MB`, sa wysylane i pobierane przez chunked transfer,
+- domyslny chunk ma `5 MB`.
+
+API Obsidiana nadal wymaga od pluginu odczytania zawartosci zmienionego pliku jako `ArrayBuffer`, zanim mozna policzyc hash i rozpoczac upload. Dla bardzo duzych zalacznikow najlepsza ochrona pozostaje limit automatycznej synchronizacji.
+
+## Szyfrowanie
+
+Plugin zawiera obsluge klientowego szyfrowania wybranych notatek i metadanych kluczy szyfrowania. Haslo szyfrowania nie jest haslem serwera. Reset hasla serwera nie odzyskuje ani nie zmienia kluczy szyfrowania danych.
 
 ## Mobile
 
-Plugin jest przygotowany do podstawowego działania w Obsidian Mobile:
+Plugin jest przygotowany do podstawowego dzialania w Obsidian Mobile:
 
-- nie używa Node.js, Electron ani `FileSystemAdapter` w kodzie pluginu,
-- używa `requestUrl` do komunikacji HTTP,
-- używa `Vault.configDir` zamiast stałej ścieżki `.obsidian`,
+- nie uzywa Node.js, Electron ani `FileSystemAdapter` w kodzie pluginu,
+- uzywa `requestUrl` do komunikacji HTTP,
+- uzywa `Vault.configDir` zamiast stalej sciezki `.obsidian`,
 - usuwa pliki przez `FileManager.trashFile`,
-- po starcie i gotowości layoutu wykonuje synchronizację,
-- po powrocie aplikacji do widoku aktywnego wykonuje reconnect WebSocket i synchronizację,
+- po starcie i gotowosci layoutu wykonuje synchronizacje,
+- po powrocie aplikacji do widoku aktywnego wykonuje reconnect WebSocket i synchronizacje,
 - po `focus`, `pageshow`, `online` i `visibilitychange` do `visible` sprawdza zmiany przez API,
-- przy przejściu aplikacji w tło zamyka WebSocket i nie zakłada działania w tle.
+- przy przejsciu aplikacji w tlo zamyka WebSocket i nie zaklada dzialania w tle.
 
-WebSocket na mobile jest traktowany jako kanał pomocniczy dla eventów, nie jako źródło prawdy. Po każdej aktywacji aplikacji plugin pobiera stan przez HTTP API na podstawie `last_applied_revision`.
+WebSocket na mobile jest kanalem pomocniczym dla eventow, nie zrodlem prawdy. Po kazdej aktywacji aplikacji plugin pobiera stan przez HTTP API na podstawie `last_applied_revision`.
 
-## Prywatność i wymagania
+## Prywatnosc
 
-- Plugin łączy się z prywatnym serwerem skonfigurowanym przez użytkownika.
-- Plugin wymaga sparowania urządzenia i przechowuje lokalny `device_token` w ustawieniach pluginu.
-- Plugin czyta pliki z vaulta, liczy ich hashe i wysyła zmienione pliki do skonfigurowanego serwera.
+- Plugin laczy sie tylko z serwerem skonfigurowanym przez uzytkownika.
+- Plugin wymaga sparowania urzadzenia i przechowuje lokalny `device_token`.
+- Plugin czyta pliki z vaulta, liczy ich hashe i wysyla zmienione pliki do skonfigurowanego serwera.
 - Plugin pobiera zmiany z serwera i zapisuje je do vaulta.
-- Plugin nie zawiera telemetrii, reklam ani zewnętrznych usług analitycznych.
-- Plugin nie wysyła danych do żadnego domyślnego serwera autora; adres serwera ustawia użytkownik.
+- Plugin nie zawiera telemetrii, reklam ani zewnetrznych uslug analitycznych.
+- Plugin nie wysyla danych do zadnego domyslnego serwera autora.
