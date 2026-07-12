@@ -163,8 +163,8 @@ export type DevicePairingRequestPayload = {
 
 export type ServerRequest = {
   id: string;
-  type: "device_pairing" | string;
-  status: "pending" | "approved" | "rejected" | "resolved" | "expired" | string;
+  type: "device_pairing" | (string & {});
+  status: "pending" | "approved" | "rejected" | "resolved" | "expired" | (string & {});
   payload_json?: string;
   payloadJson?: string;
   decision_json?: string | null;

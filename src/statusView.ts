@@ -143,7 +143,7 @@ export class PrivateSyncView extends ItemView {
         }
         for (const device of response.devices) this.deviceRow(list, device);
       })
-      .catch((error) => this.row(list, "Error", error.message));
+      .catch((error) => this.row(list, "Error", errorMessage(error)));
     this.row(list, "Loading", kind);
   }
 
@@ -235,7 +235,7 @@ export class PrivateSyncView extends ItemView {
         this.conflictBulkToolbar(conflictRoot, items);
         const list = conflictRoot.createDiv({ cls: "private-sync-list" });
         if (items.length === 0) {
-          this.row(list, "Error", error.message);
+            this.row(list, "Error", errorMessage(error));
           return;
         }
         for (const item of items) this.conflictRow(list, item);
@@ -270,7 +270,7 @@ export class PrivateSyncView extends ItemView {
           }
         }
       })
-      .catch((error) => this.row(list, "Error", error.message));
+      .catch((error) => this.row(list, "Error", errorMessage(error)));
     this.row(list, "Loading", "requests");
   }
 
@@ -314,7 +314,7 @@ export class PrivateSyncView extends ItemView {
         }
         for (const entry of response.history) this.historyRow(list, entry);
       })
-      .catch((error) => this.row(list, "Error", error.message));
+      .catch((error) => this.row(list, "Error", errorMessage(error)));
     this.row(list, "Loading", this.historyPath);
   }
 
@@ -932,7 +932,7 @@ export class PrivateSyncView extends ItemView {
     if (localPassphrase) {
       try {
         return await this.plugin.syncEngine.downloadHistoryEntryPlainWithPassphrase(entry, localPassphrase);
-      } catch (error) {
+      } catch {
         // Fall through to one-time passphrase prompt for older revisions.
       }
     }
@@ -962,7 +962,7 @@ export class PrivateSyncView extends ItemView {
       try {
         await this.plugin.syncEngine.downloadHistoryEntryPlainWithPassphrase(entry, localPassphrase);
         return localPassphrase;
-      } catch (error) {
+      } catch {
         // Fall through to one-time passphrase prompt for older revisions.
       }
     }
@@ -1015,12 +1015,12 @@ class VaultRenameModal extends Modal {
     });
     this.input.oninput = () => this.updateState();
     this.input.onkeydown = (event) => {
-      if (event.key === "Enter") this.save();
+      if (event.key === "Enter") void this.save();
     };
     const actions = this.contentEl.createDiv({ cls: "private-sync-modal-actions" });
     actions.createEl("button", { text: "Cancel", cls: "private-sync-button private-sync-button-subtle" }).onclick = () => this.close();
     this.saveButton = actions.createEl("button", { text: "Save", cls: "private-sync-button private-sync-button-primary" });
-    this.saveButton.onclick = () => this.save();
+    this.saveButton.onclick = () => void this.save();
     this.updateState();
     this.input.focus();
     this.input.select();
@@ -1085,7 +1085,7 @@ class VaultDeleteModal extends Modal {
       this.updateState();
     };
     this.input.onkeydown = (event) => {
-      if (event.key === "Enter") this.delete();
+      if (event.key === "Enter") void this.delete();
     };
     const actions = this.contentEl.createDiv({ cls: "private-sync-modal-actions" });
     actions.createEl("button", { text: "Cancel", cls: "private-sync-button private-sync-button-subtle" }).onclick = () => this.close();
@@ -1093,7 +1093,7 @@ class VaultDeleteModal extends Modal {
       text: "Delete permanently",
       cls: "private-sync-button private-sync-button-danger"
     });
-    this.deleteButton.onclick = () => this.delete();
+    this.deleteButton.onclick = () => void this.delete();
     this.updateState();
     this.input.focus();
   }
@@ -1157,12 +1157,12 @@ class HistoryPassphraseModal extends Modal {
     });
     this.input.oninput = () => this.updateState();
     this.input.onkeydown = (event) => {
-      if (event.key === "Enter") this.submit();
+      if (event.key === "Enter") void this.submit();
     };
     const actions = this.contentEl.createDiv({ cls: "private-sync-modal-actions" });
     actions.createEl("button", { text: "Cancel", cls: "private-sync-button private-sync-button-subtle" }).onclick = () => this.finish(null);
     this.submitButton = actions.createEl("button", { text: "Use once", cls: "private-sync-button private-sync-button-primary" });
-    this.submitButton.onclick = () => this.submit();
+    this.submitButton.onclick = () => void this.submit();
     this.updateState();
     this.input.focus();
   }

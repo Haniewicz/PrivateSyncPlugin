@@ -496,13 +496,13 @@ class EncryptionPassphraseChangeModal extends Modal {
       this.updateState();
     };
     repeatedInput.onkeydown = (event) => {
-      if (event.key === "Enter") this.submit();
+      if (event.key === "Enter") void this.submit();
     };
 
     const actions = this.contentEl.createDiv({ cls: "private-sync-modal-actions" });
     actions.createEl("button", { text: "Cancel", cls: "private-sync-button private-sync-button-subtle" }).onclick = () => this.close();
     this.submitButton = actions.createEl("button", { text: "Change", cls: "private-sync-button private-sync-button-primary" });
-    this.submitButton.onclick = () => this.submit();
+    this.submitButton.onclick = () => void this.submit();
     this.updateState();
     passphraseInput.focus();
   }

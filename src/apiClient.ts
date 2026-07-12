@@ -297,7 +297,8 @@ export class ApiClient {
       const token = this.getToken();
       if (token) headers.authorization = `Bearer ${token}`;
     }
-    const { authenticated, ...requestInit } = init;
+    const requestInit = { ...init };
+    delete requestInit.authenticated;
     const url = `${this.serverUrl.replace(/\/$/, "")}${path}`;
     let response: RequestUrlResponse;
     try {

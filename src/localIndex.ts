@@ -8,12 +8,13 @@ export class LocalIndexStore {
   constructor(private readonly plugin: PrivateSyncPlugin) {}
 
   async load(): Promise<LocalIndex> {
-    const data = await this.plugin.loadData();
+    const data: unknown = await this.plugin.loadData();
+    const storedIndex = storedLocalIndex(data);
     this.index = {
       ...DEFAULT_INDEX,
-      ...(data?.index ?? {}),
-      files: data?.index?.files ?? {},
-      queue: data?.index?.queue ?? []
+      ...(storedIndex ?? {}),
+      files: storedIndex?.files ?? {},
+      queue: storedIndex?.queue ?? []
     };
     return this.index;
   }
@@ -50,4 +51,14 @@ export class LocalIndexStore {
     this.index.queue = this.index.queue.filter((operation) => operation.path !== path);
     await this.save();
   }
+}
+
+function storedLocalIndex(data: unknown): Partial<LocalIndex> | null {
+  if (!isRecord(data)) return null;
+  const index = data.index;
+  return isRecord(index) ? index as Partial<LocalIndex> : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

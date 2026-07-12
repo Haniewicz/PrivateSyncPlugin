@@ -1,7 +1,7 @@
 import { Editor, Notice, Plugin, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import { ApiClient } from "./apiClient";
 import { createEncryptionKeyCheck, decryptTextFragment, encryptTextFragment, uuid, verifyEncryptionKeyCheck } from "./crypto";
-import { DEFAULT_INDEX, DEFAULT_SETTINGS } from "./defaults";
+import { DEFAULT_SETTINGS } from "./defaults";
 import { LocalIndexStore } from "./localIndex";
 import { decryptNoteBodyText, markNoteForServerEncryption, unmarkNoteForServerEncryption } from "./noteEncryption";
 import { PairingApprovalModal, parseDevicePairingPayload } from "./pairingApprovalModal";
@@ -57,74 +57,74 @@ export default class PrivateSyncPlugin extends Plugin {
     this.addSettingTab(new PrivateSyncSettingTab(this.app, this));
 
     this.addCommand({
-      id: "private-sync-now",
+      id: "sync-now",
       name: "Sync now",
-      callback: () => this.syncEngine.syncNow()
+      callback: () => void this.syncEngine.syncNow()
     });
     this.addCommand({
-      id: "private-sync-pair-device",
+      id: "pair-device",
       name: "Pair this device",
-      callback: () => this.syncEngine.pairDevice()
+      callback: () => void this.syncEngine.pairDevice()
     });
     this.addCommand({
-      id: "private-sync-open-panel",
+      id: "open-panel",
       name: "Open sync panel",
-      callback: () => this.activateView()
+      callback: () => void this.activateView()
     });
     this.addCommand({
-      id: "private-sync-check-pairing-requests",
+      id: "check-pairing-requests",
       name: "Check pairing requests",
-      callback: () => this.checkPairingRequests()
+      callback: () => void this.checkPairingRequests()
     });
     this.addCommand({
-      id: "private-sync-encrypt-selection",
+      id: "encrypt-selection",
       name: "Encrypt selected text",
-      editorCallback: (editor) => this.encryptEditorSelection(editor)
+      editorCallback: (editor) => void this.encryptEditorSelection(editor)
     });
     this.addCommand({
-      id: "private-sync-decrypt-selection",
+      id: "decrypt-selection",
       name: "Decrypt selected encrypted text",
-      editorCallback: (editor) => this.decryptEditorSelection(editor)
+      editorCallback: (editor) => void this.decryptEditorSelection(editor)
     });
     this.addCommand({
-      id: "private-sync-encrypt-note-body",
+      id: "encrypt-note-body",
       name: "Encrypt current note on server",
-      editorCallback: (editor) => this.markCurrentNoteForServerEncryption(editor)
+      editorCallback: (editor) => void this.markCurrentNoteForServerEncryption(editor)
     });
     this.addCommand({
-      id: "private-sync-decrypt-note-body",
+      id: "decrypt-note-body",
       name: "Decrypt current note body",
-      editorCallback: (editor) => this.decryptCurrentNoteBody(editor)
+      editorCallback: (editor) => void this.decryptCurrentNoteBody(editor)
     });
     this.addCommand({
-      id: "private-sync-enable-note-auto-encryption",
+      id: "enable-note-auto-encryption",
       name: "Enable server encryption for current note",
-      editorCallback: (editor) => this.markCurrentNoteForServerEncryption(editor)
+      editorCallback: (editor) => void this.markCurrentNoteForServerEncryption(editor)
     });
     this.addCommand({
-      id: "private-sync-disable-note-auto-encryption",
+      id: "disable-note-auto-encryption",
       name: "Disable server encryption for current note",
-      editorCallback: (editor) => this.disableCurrentNoteAutoEncryption(editor)
+      editorCallback: (editor) => void this.disableCurrentNoteAutoEncryption(editor)
     });
 
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
-        if (file instanceof TFile && this.settings.autoSync) this.debouncedSync();
+        if (file instanceof TFile && this.settings.autoSync) void this.debouncedSync();
       })
     );
     this.registerEvent(
       this.app.vault.on("delete", () => {
-        if (this.settings.autoSync) this.debouncedSync();
+        if (this.settings.autoSync) void this.debouncedSync();
       })
     );
     this.registerEvent(
       this.app.vault.on("create", () => {
-        if (this.settings.autoSync) this.debouncedSync();
+        if (this.settings.autoSync) void this.debouncedSync();
       })
     );
 
     this.registerMobileLifecycleHandlers();
-    this.app.workspace.onLayoutReady(() => this.handleAppBecameActive("layout-ready"));
+    this.app.workspace.onLayoutReady(() => void this.handleAppBecameActive("layout-ready"));
   }
 
   onunload(): void {
@@ -408,7 +408,7 @@ export default class PrivateSyncPlugin extends Plugin {
     const leaf = this.app.workspace.getRightLeaf(false);
     if (!leaf) return;
     await leaf.setViewState({ type: PRIVATE_SYNC_VIEW, active: true });
-    this.app.workspace.revealLeaf(leaf);
+    await this.app.workspace.revealLeaf(leaf);
   }
 
   private debouncedSync = debounce(async () => {
@@ -435,9 +435,9 @@ export default class PrivateSyncPlugin extends Plugin {
     this.registerDomEvent(window, "pageshow", onActive);
     this.registerDomEvent(window, "online", onActive);
     this.registerDomEvent(window, "offline", onOffline);
-    this.registerDomEvent(document, "visibilitychange", () => {
-      if (document.visibilityState === "visible") {
-        this.handleAppBecameActive("visible");
+    this.registerDomEvent(activeDocument, "visibilitychange", () => {
+      if (activeDocument.visibilityState === "visible") {
+        void this.handleAppBecameActive("visible");
       } else {
         onHidden();
       }
@@ -453,8 +453,8 @@ export default class PrivateSyncPlugin extends Plugin {
     if (!this.settings.vaultLinked) return;
     if (this.handleOfflineSyncAttempt()) return;
     this.reconnectEvents();
-    this.checkPairingRequests();
-    if (this.settings.autoSync) this.debouncedSync();
+    void this.checkPairingRequests();
+    if (this.settings.autoSync) void this.debouncedSync();
   }
 
   private handleAppWentInactive(): void {
@@ -472,7 +472,7 @@ export default class PrivateSyncPlugin extends Plugin {
     if (!this.settings.deviceToken || this.unloading) return;
     if (!this.settings.vaultLinked) return;
     if (this.isOffline()) return;
-    if (document.visibilityState === "hidden") return;
+    if (activeDocument.visibilityState === "hidden") return;
     if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) return;
 
     const url = this.settings.serverUrl.replace(/^http/, "ws").replace(/\/$/, "") + `/api/v1/events?token=${encodeURIComponent(this.settings.deviceToken)}`;
@@ -480,18 +480,18 @@ export default class PrivateSyncPlugin extends Plugin {
     this.socket = socket;
     socket.onopen = () => {
       if (this.socket !== socket) return;
-      this.checkPairingRequests();
-      if (this.settings.autoSync) this.debouncedSync();
+      void this.checkPairingRequests();
+      if (this.settings.autoSync) void this.debouncedSync();
     };
     socket.onmessage = (event) => {
       if (this.socket !== socket) return;
       const message = parseServerEvent(event.data);
       if (message.type === "request_created") {
-        this.checkPairingRequests();
+        void this.checkPairingRequests();
       }
       if (message.type === "vault_changed" || message.type === "conflict_created") {
         if (!this.handleOfflineSyncAttempt()) {
-          this.syncEngine.syncNow().catch((error) => new Notice(`Private Sync: ${error.message}`));
+          this.syncEngine.syncNow().catch((error) => new Notice(`Private Sync: ${errorMessage(error)}`));
         }
       }
       if (message.type === "conflict_resolved") {
@@ -517,7 +517,7 @@ export default class PrivateSyncPlugin extends Plugin {
     socket.onclose = () => {
       if (this.socket !== socket) return;
       this.socket = null;
-      if (!this.unloading && document.visibilityState !== "hidden") {
+      if (!this.unloading && activeDocument.visibilityState !== "hidden") {
         this.scheduleReconnect();
       }
     };
@@ -572,7 +572,7 @@ export default class PrivateSyncPlugin extends Plugin {
     this.updateConnectionStatus();
     if (!this.offlineNoticeShown) {
       this.offlineNoticeShown = true;
-      this.recordSyncEvent({
+      void this.recordSyncEvent({
         type: "offline",
         message: "Jesteś offline. Dane nie są synchronizowane"
       });
