@@ -1,10 +1,21 @@
 # Private Sync Plugin
 
+Private Sync Plugin synchronizes an Obsidian vault with a self-hosted Private Sync Server backend.
+
+Server backend: https://github.com/Haniewicz/PrivateSyncServer
+
+The plugin does not use an author-hosted default cloud and does not send data to any external service by default. The user provides the URL of their own server in the plugin settings.
+
+<details>
+<summary>Polski</summary>
+
 Private Sync Plugin synchronizuje vault Obsidiana z prywatnym backendem Private Sync Server.
 
 Backend serwera: https://github.com/Haniewicz/PrivateSyncServer
 
 Plugin nie korzysta z domyslnej chmury autora i nie wysyla danych do zadnej uslugi zewnetrznej. Uzytkownik podaje w ustawieniach adres wlasnego serwera.
+
+</details>
 
 ## Wymagania
 
