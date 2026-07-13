@@ -1,7 +1,7 @@
 {
   "id": "private-sync",
   "name": "Private Sync",
-  "version": "1.0.3-dev0.1",
+  "version": "1.0.3-dev0.2",
   "minAppVersion": "1.11.4",
   "description": "Synchronize a vault with a private server.",
   "author": "Haniewicz",

@@ -175,9 +175,14 @@ export class ApiClient {
         }
       );
       const chunk = new Uint8Array(response.arrayBuffer);
+      const expectedSize = end - start + 1;
+      if (chunk.byteLength !== expectedSize) {
+        throw new Error(`Chunked download failed for ${path}: expected ${expectedSize} bytes, got ${chunk.byteLength}.`);
+      }
       chunks.push(chunk);
       total += chunk.byteLength;
     }
+    if (total !== size) throw new Error(`Chunked download failed for ${path}: expected ${size} bytes, got ${total}.`);
     const merged = new Uint8Array(total);
     let offset = 0;
     for (const chunk of chunks) {

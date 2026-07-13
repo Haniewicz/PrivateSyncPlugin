@@ -14,7 +14,7 @@ import {
   writeLocalBinary
 } from "./localFiles";
 import type { LocalIndexStore } from "./localIndex";
-import { encryptedPlaceholderInfo, encryptedPlaceholderText, isEncryptedNoteBody, isEncryptedPlaceholder, isMarkedForServerEncryption } from "./noteEncryption";
+import { encryptedPlaceholderInfo, encryptedPlaceholderText, isEncryptedPlaceholder, isMarkedForServerEncryption } from "./noteEncryption";
 import type PrivateSyncPlugin from "./plugin";
 import { collectCommunityPluginIds, getCommunityPluginId, shouldSyncPath } from "./settingsSyncPolicy";
 import type { LocalFileRecord, PendingOperation, ServerChange } from "./types";
@@ -443,6 +443,17 @@ export class SyncEngine {
       const stat = await getLocalFileStat(this.plugin, operation.path);
       if (!stat) continue;
       const content = await readLocalBinary(this.plugin, operation.path);
+      const stableStat = await getLocalFileStat(this.plugin, operation.path);
+      if (!stableStat || stableStat.size !== stat.size || stableStat.mtime !== stat.mtime) {
+        const record = index.files[operation.path];
+        if (record) record.status = "pending_upload";
+        await this.plugin.recordSyncEvent({
+          type: "error",
+          path: operation.path,
+          message: `Skipped upload for ${operation.path}: file changed while it was being read.`
+        });
+        continue;
+      }
       const plaintextHash = await sha256(content);
       const shouldEncrypt = this.shouldEncryptUpload(operation.path, content);
       if (shouldEncrypt && !this.plugin.isEncryptionUnlocked()) {
@@ -1518,7 +1529,7 @@ function isMarkdownPath(path: string): boolean {
 }
 
 function isLocalEncryptedMarkdownText(text: string): boolean {
-  return isEncryptedNoteBody(text) || isEncryptedPayload(text.trim());
+  return isEncryptedPayload(text.trim());
 }
 
 function mergeTextThreeWay(baseText: string, localText: string, remoteText: string): ThreeWayMergeResult | null {
