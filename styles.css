@@ -252,6 +252,80 @@
   background: var(--background-secondary);
 }
 
+.private-sync-encrypted-fragment {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  margin: 0 2px;
+  padding: 2px 5px;
+  border: 1px solid var(--interactive-accent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+  vertical-align: baseline;
+  white-space: normal;
+}
+
+.private-sync-encrypted-fragment.is-locked {
+  border-color: var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+}
+
+.private-sync-encrypted-fragment.is-error {
+  border-color: var(--text-error, var(--color-red));
+  background: var(--background-modifier-error, var(--background-secondary));
+}
+
+.private-sync-encrypted-fragment-label {
+  flex: 0 0 auto;
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  color: var(--interactive-accent);
+}
+
+.private-sync-encrypted-fragment.is-locked .private-sync-encrypted-fragment-label {
+  color: var(--text-muted);
+}
+
+.private-sync-encrypted-fragment-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.private-sync-encrypted-fragment-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.private-sync-encrypted-fragment-action {
+  height: auto;
+  min-height: 0;
+  padding: 1px 5px;
+  border-radius: 5px;
+  font-size: var(--font-ui-smaller);
+  line-height: 1.4;
+}
+
+.private-sync-encrypted-fragment-preview {
+  margin-block: 1px;
+}
+
+.private-sync-fragment-modal {
+  display: grid;
+  gap: 10px;
+  min-width: min(560px, 80vw);
+}
+
+.private-sync-fragment-textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 180px;
+  resize: vertical;
+}
+
 .private-sync-vault-modal {
   display: grid;
   gap: 10px;
