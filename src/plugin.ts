@@ -1,7 +1,10 @@
-import { Editor, Notice, Plugin, setIcon, TFile, WorkspaceLeaf } from "obsidian";
+import type { EditorView } from "@codemirror/view";
+import { Editor, Modal, Notice, Plugin, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import { ApiClient } from "./apiClient";
 import { createEncryptionKeyCheck, decryptTextFragment, encryptTextFragment, uuid, verifyEncryptionKeyCheck } from "./crypto";
 import { DEFAULT_SETTINGS } from "./defaults";
+import { createEncryptedFragmentEditorExtension } from "./encryptedFragmentEditor";
+import { findEncryptedFragmentAtOffset, findEncryptedFragments, type EncryptedFragmentRange } from "./encryptedFragments";
 import { LocalIndexStore } from "./localIndex";
 import { decryptNoteBodyText, markNoteForServerEncryption, unmarkNoteForServerEncryption } from "./noteEncryption";
 import { PairingApprovalModal, parseDevicePairingPayload } from "./pairingApprovalModal";
@@ -24,6 +27,10 @@ type AggregatedNotice = {
   timer: number;
 };
 
+type EncryptedFragmentDisplay =
+  | { status: "decrypted"; text: string }
+  | { status: "failed"; message: string };
+
 const ENCRYPTION_SECRET_ID = "private-sync-encryption-passphrase";
 
 export default class PrivateSyncPlugin extends Plugin {
@@ -41,6 +48,8 @@ export default class PrivateSyncPlugin extends Plugin {
   private activePairingRequestModals = new Set<string>();
   private unloading = false;
   private aggregatedNotices = new Map<string, AggregatedNotice>();
+  private encryptedFragmentDisplayCache = new Map<string, EncryptedFragmentDisplay>();
+  private encryptedFragmentDecrypts = new Map<string, Promise<string>>();
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -50,6 +59,10 @@ export default class PrivateSyncPlugin extends Plugin {
     this.recreateApi();
 
     this.registerView(PRIVATE_SYNC_VIEW, (leaf: WorkspaceLeaf) => new PrivateSyncView(leaf, this));
+    this.registerEditorExtension(createEncryptedFragmentEditorExtension(this));
+    this.registerMarkdownPostProcessor((element) => {
+      void this.renderEncryptedFragmentsInPreview(element);
+    });
     this.addRibbonIcon("refresh-cw", "Private Sync", () => this.activateView());
     this.statusBarItem = this.addStatusBarItem();
     this.statusBarItem.addClass("private-sync-status-bar");
@@ -85,6 +98,16 @@ export default class PrivateSyncPlugin extends Plugin {
       id: "decrypt-selection",
       name: "Decrypt selected encrypted text",
       editorCallback: (editor) => void this.decryptEditorSelection(editor)
+    });
+    this.addCommand({
+      id: "edit-encrypted-fragment-at-cursor",
+      name: "Edit encrypted fragment at cursor",
+      editorCallback: (editor) => void this.editEncryptedFragmentAtCursor(editor)
+    });
+    this.addCommand({
+      id: "decrypt-encrypted-fragment-at-cursor",
+      name: "Decrypt encrypted fragment at cursor",
+      editorCallback: (editor) => void this.decryptEncryptedFragmentAtCursor(editor)
     });
     this.addCommand({
       id: "encrypt-note-body",
@@ -189,6 +212,7 @@ export default class PrivateSyncPlugin extends Plugin {
     if (this.settings.rememberEncryptionPassphrase) this.rememberEncryptionPassphrase(trimmed);
     await this.saveSettings();
     if (active && active.id !== key.id) await this.syncEngine.queueEncryptedUploadsForRotation();
+    this.refreshEncryptedFragmentDisplays();
     this.refreshView();
     this.syncAfterEncryptionUnlock();
   }
@@ -215,12 +239,16 @@ export default class PrivateSyncPlugin extends Plugin {
     }
     if (this.settings.rememberEncryptionPassphrase) this.rememberEncryptionPassphrase(trimmed);
     await this.saveSettings();
+    this.refreshEncryptedFragmentDisplays();
     this.refreshView();
     this.syncAfterEncryptionUnlock();
   }
 
   lockEncryption(): void {
     this.encryptionPassphrase = "";
+    this.encryptedFragmentDisplayCache.clear();
+    this.encryptedFragmentDecrypts.clear();
+    this.refreshEncryptedFragmentDisplays();
     this.refreshView();
   }
 
@@ -240,6 +268,7 @@ export default class PrivateSyncPlugin extends Plugin {
     if (!passphrase) return;
     if (await verifyEncryptionKeyCheck(this.settings.encryptionKeyCheck, passphrase)) {
       this.encryptionPassphrase = passphrase;
+      this.refreshEncryptedFragmentDisplays();
     } else {
       this.forgetEncryptionPassphrase();
     }
@@ -381,6 +410,91 @@ export default class PrivateSyncPlugin extends Plugin {
       const view = leaf.view;
       if (view instanceof PrivateSyncView) view.refresh();
     }
+  }
+
+  refreshEncryptedFragmentDisplays(): void {
+    window.dispatchEvent(new CustomEvent("private-sync-encrypted-fragments-refresh"));
+    this.refreshEncryptedFragmentPreviewDisplays();
+  }
+
+  getEncryptedFragmentDisplay(marker: string): EncryptedFragmentDisplay | null {
+    return this.encryptedFragmentDisplayCache.get(marker) ?? null;
+  }
+
+  async decryptEncryptedFragmentForDisplay(marker: string): Promise<string> {
+    const cached = this.encryptedFragmentDisplayCache.get(marker);
+    if (cached?.status === "decrypted") return cached.text;
+    const pending = this.encryptedFragmentDecrypts.get(marker);
+    if (pending) return pending;
+
+    const decrypt = decryptTextFragment(marker, this.requireEncryptionPassphrase())
+      .then((text) => {
+        this.encryptedFragmentDisplayCache.set(marker, { status: "decrypted", text });
+        this.encryptedFragmentDecrypts.delete(marker);
+        return text;
+      })
+      .catch((error) => {
+        this.encryptedFragmentDisplayCache.set(marker, { status: "failed", message: errorMessage(error) });
+        this.encryptedFragmentDecrypts.delete(marker);
+        throw error;
+      });
+    this.encryptedFragmentDecrypts.set(marker, decrypt);
+    return decrypt;
+  }
+
+  async editEncryptedFragmentInEditorView(view: EditorView, marker: string, position?: number): Promise<void> {
+    try {
+      const fragment = this.findFragmentInEditorView(view, marker, position);
+      if (!fragment) throw new Error("Encrypted fragment was not found.");
+      const plaintext = await this.decryptEncryptedFragmentForDisplay(fragment.marker);
+      new EncryptedFragmentEditModal(this, plaintext, async (nextText) => {
+        const currentFragment = this.findFreshFragment(view.state.doc.toString(), fragment);
+        if (!currentFragment) throw new Error("Encrypted fragment changed before it could be saved.");
+        const nextMarker = await encryptTextFragment(nextText, this.requireEncryptionPassphrase());
+        view.dispatch({
+          changes: { from: currentFragment.start, to: currentFragment.end, insert: nextMarker },
+          selection: { anchor: currentFragment.start + nextMarker.length }
+        });
+        this.encryptedFragmentDisplayCache.delete(fragment.marker);
+        this.encryptedFragmentDisplayCache.set(nextMarker, { status: "decrypted", text: nextText });
+        this.refreshEncryptedFragmentDisplays();
+        new Notice("Private Sync: encrypted fragment updated.", 5000);
+      }).open();
+    } catch (error) {
+      new Notice(`Private Sync encrypted fragment edit failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
+  async decryptEncryptedFragmentInEditorView(view: EditorView, marker: string, position?: number): Promise<void> {
+    try {
+      const fragment = this.findFragmentInEditorView(view, marker, position);
+      if (!fragment) throw new Error("Encrypted fragment was not found.");
+      const plaintext = await this.decryptEncryptedFragmentForDisplay(fragment.marker);
+      const currentFragment = this.findFreshFragment(view.state.doc.toString(), fragment);
+      if (!currentFragment) throw new Error("Encrypted fragment changed before it could be replaced.");
+      view.dispatch({
+        changes: { from: currentFragment.start, to: currentFragment.end, insert: plaintext },
+        selection: { anchor: currentFragment.start + plaintext.length }
+      });
+      this.encryptedFragmentDisplayCache.delete(fragment.marker);
+      this.refreshEncryptedFragmentDisplays();
+      new Notice("Private Sync: encrypted fragment decrypted to plain text.", 7000);
+    } catch (error) {
+      new Notice(`Private Sync fragment decryption failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
+  private findFragmentInEditorView(view: EditorView, marker: string, position?: number): EncryptedFragmentRange | null {
+    const fragments = findEncryptedFragments(view.state.doc.toString()).filter((fragment) => fragment.marker === marker);
+    if (fragments.length === 0) return null;
+    if (position === undefined) return fragments[0];
+    return fragments.find((fragment) => position >= fragment.start && position <= fragment.end)
+      ?? fragments.sort((left, right) => Math.abs(left.start - position) - Math.abs(right.start - position))[0];
+  }
+
+  private findFreshFragment(text: string, original: EncryptedFragmentRange): EncryptedFragmentRange | null {
+    if (text.slice(original.start, original.end) === original.marker) return original;
+    return findEncryptedFragments(text).find((fragment) => fragment.marker === original.marker) ?? null;
   }
 
   async checkPairingRequests(): Promise<void> {
@@ -605,6 +719,44 @@ export default class PrivateSyncPlugin extends Plugin {
     }
   }
 
+  private async editEncryptedFragmentAtCursor(editor: Editor): Promise<void> {
+    try {
+      const target = findEncryptedMarker(editor);
+      if (!target) throw new Error("Place the cursor inside an encrypted fragment first.");
+      const plaintext = await this.decryptEncryptedFragmentForDisplay(target.text);
+      new EncryptedFragmentEditModal(this, plaintext, async (nextText) => {
+        const currentText = editor.getValue();
+        const fragment = findEncryptedFragmentAtOffset(currentText, editor.posToOffset(target.from));
+        if (!fragment || fragment.marker !== target.text) throw new Error("Encrypted fragment changed before it could be saved.");
+        const nextMarker = await encryptTextFragment(nextText, this.requireEncryptionPassphrase());
+        editor.replaceRange(nextMarker, editor.offsetToPos(fragment.start), editor.offsetToPos(fragment.end));
+        this.encryptedFragmentDisplayCache.delete(target.text);
+        this.encryptedFragmentDisplayCache.set(nextMarker, { status: "decrypted", text: nextText });
+        this.refreshEncryptedFragmentDisplays();
+        new Notice("Private Sync: encrypted fragment updated.", 5000);
+      }).open();
+    } catch (error) {
+      new Notice(`Private Sync encrypted fragment edit failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
+  private async decryptEncryptedFragmentAtCursor(editor: Editor): Promise<void> {
+    try {
+      const target = findEncryptedMarker(editor);
+      if (!target) throw new Error("Place the cursor inside an encrypted fragment first.");
+      const plaintext = await this.decryptEncryptedFragmentForDisplay(target.text);
+      const currentText = editor.getValue();
+      const fragment = findEncryptedFragmentAtOffset(currentText, editor.posToOffset(target.from));
+      if (!fragment || fragment.marker !== target.text) throw new Error("Encrypted fragment changed before it could be replaced.");
+      editor.replaceRange(plaintext, editor.offsetToPos(fragment.start), editor.offsetToPos(fragment.end));
+      this.encryptedFragmentDisplayCache.delete(target.text);
+      this.refreshEncryptedFragmentDisplays();
+      new Notice("Private Sync: encrypted fragment decrypted to plain text.", 7000);
+    } catch (error) {
+      new Notice(`Private Sync fragment decryption failed: ${errorMessage(error)}`, 10000);
+    }
+  }
+
   private markCurrentNoteForServerEncryption(editor: Editor): void {
     try {
       editor.setValue(markNoteForServerEncryption(editor.getValue()));
@@ -631,6 +783,86 @@ export default class PrivateSyncPlugin extends Plugin {
     } catch (error) {
       new Notice(`Private Sync: cannot disable note auto-encryption: ${errorMessage(error)}`, 10000);
     }
+  }
+
+  private async renderEncryptedFragmentsInPreview(element: HTMLElement): Promise<void> {
+    const nodes: CharacterData[] = [];
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_COMMENT, {
+      acceptNode: (node) => {
+        const parent = node.parentElement;
+        if (parent?.closest(".private-sync-encrypted-fragment")) return NodeFilter.FILTER_REJECT;
+        return findEncryptedFragments(node.nodeValue ?? "").length > 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      }
+    });
+    while (walker.nextNode()) nodes.push(walker.currentNode as CharacterData);
+
+    for (const node of nodes) {
+      const text = node.nodeValue ?? "";
+      const fragments = findEncryptedFragments(text);
+      if (fragments.length === 0 || !node.parentNode) continue;
+      const replacement = document.createDocumentFragment();
+      let cursor = 0;
+      for (const fragment of fragments) {
+        if (fragment.start > cursor) replacement.appendText(text.slice(cursor, fragment.start));
+        replacement.appendChild(this.createEncryptedFragmentPreviewElement(fragment.marker));
+        cursor = fragment.end;
+      }
+      if (cursor < text.length) replacement.appendText(text.slice(cursor));
+      node.parentNode.replaceChild(replacement, node);
+    }
+  }
+
+  private createEncryptedFragmentPreviewElement(marker: string): HTMLElement {
+    const wrapper = document.createElement("span");
+    wrapper.className = "private-sync-encrypted-fragment private-sync-encrypted-fragment-preview";
+    wrapper.dataset.privateSyncEncryptedMarker = marker;
+    this.updateEncryptedFragmentPreviewElement(wrapper, marker);
+    return wrapper;
+  }
+
+  private refreshEncryptedFragmentPreviewDisplays(): void {
+    for (const wrapper of Array.from(activeDocument.querySelectorAll<HTMLElement>(".private-sync-encrypted-fragment-preview[data-private-sync-encrypted-marker]"))) {
+      const marker = wrapper.dataset.privateSyncEncryptedMarker;
+      if (marker) this.updateEncryptedFragmentPreviewElement(wrapper, marker);
+    }
+  }
+
+  private updateEncryptedFragmentPreviewElement(wrapper: HTMLElement, marker: string): void {
+    wrapper.empty();
+    wrapper.removeClass("is-locked");
+    wrapper.removeClass("is-error");
+    wrapper.createSpan({ text: "Encrypted", cls: "private-sync-encrypted-fragment-label" });
+    const body = wrapper.createSpan({ cls: "private-sync-encrypted-fragment-body" });
+    if (!this.isEncryptionUnlocked()) {
+      wrapper.addClass("is-locked");
+      body.textContent = "Encrypted fragment";
+      return;
+    }
+
+    const cached = this.getEncryptedFragmentDisplay(marker);
+    if (cached?.status === "decrypted") {
+      body.textContent = cached.text;
+      return;
+    }
+    if (cached?.status === "failed") {
+      wrapper.addClass("is-error");
+      body.textContent = "Encrypted fragment";
+      body.title = cached.message;
+      return;
+    }
+
+    body.textContent = "Decrypting...";
+    this.decryptEncryptedFragmentForDisplay(marker)
+      .then((text) => {
+        if (wrapper.dataset.privateSyncEncryptedMarker !== marker) return;
+        body.textContent = text;
+      })
+      .catch((error) => {
+        if (wrapper.dataset.privateSyncEncryptedMarker !== marker) return;
+        wrapper.addClass("is-error");
+        body.textContent = "Encrypted fragment";
+        body.title = errorMessage(error);
+      });
   }
 
   private updateConnectionStatus(): void {
@@ -700,4 +932,72 @@ function findEncryptedMarker(editor: Editor): { text: string; from: { line: numb
     }
   }
   return null;
+}
+
+class EncryptedFragmentEditModal extends Modal {
+  private textarea!: HTMLTextAreaElement;
+  private saveButton!: HTMLButtonElement;
+  private value: string;
+
+  constructor(
+    private readonly plugin: PrivateSyncPlugin,
+    initialValue: string,
+    private readonly onSave: (text: string) => Promise<void>
+  ) {
+    super(plugin.app);
+    this.value = initialValue;
+  }
+
+  onOpen(): void {
+    this.titleEl.setText("Edit encrypted fragment");
+    this.contentEl.empty();
+    this.contentEl.addClass("private-sync-fragment-modal");
+
+    this.contentEl.createDiv({
+      text: "This text stays encrypted in the note after saving.",
+      cls: "private-sync-muted"
+    });
+
+    this.textarea = this.contentEl.createEl("textarea", {
+      cls: "private-sync-fragment-textarea"
+    });
+    this.textarea.value = this.value;
+    this.textarea.oninput = () => {
+      this.value = this.textarea.value;
+      this.updateSubmitState();
+    };
+
+    const actions = this.contentEl.createDiv({ cls: "private-sync-modal-actions" });
+    const cancelButton = actions.createEl("button", { text: "Cancel" });
+    cancelButton.type = "button";
+    cancelButton.onclick = () => this.close();
+
+    this.saveButton = actions.createEl("button", { text: "Save", cls: "mod-cta" });
+    this.saveButton.type = "button";
+    this.saveButton.onclick = () => void this.save();
+    this.updateSubmitState();
+    this.textarea.focus();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+
+  private updateSubmitState(): void {
+    if (this.saveButton) this.saveButton.disabled = this.value.length === 0;
+  }
+
+  private async save(): Promise<void> {
+    if (this.value.length === 0) return;
+    this.saveButton.disabled = true;
+    this.saveButton.setText("Saving...");
+    try {
+      await this.onSave(this.value);
+      this.close();
+    } catch (error) {
+      new Notice(`Private Sync encrypted fragment save failed: ${errorMessage(error)}`, 10000);
+      this.saveButton.setText("Save");
+      this.updateSubmitState();
+    }
+  }
 }

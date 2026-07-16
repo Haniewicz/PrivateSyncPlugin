@@ -146,7 +146,13 @@ export class ApiClient {
     );
   }
 
-  async commit(vaultId: string, batchId: string): Promise<{ status: string; revision?: number; conflicts?: string[]; requestId?: string }> {
+  async commit(vaultId: string, batchId: string): Promise<{
+    status: string;
+    revision?: number;
+    fileRevisions?: Array<{ path: string; fileRevisionId: number | null }>;
+    conflicts?: string[];
+    requestId?: string;
+  }> {
     return this.post(`/api/v1/vaults/${encodeURIComponent(vaultId)}/sync-batches/${encodeURIComponent(batchId)}/commit`, {});
   }
 
@@ -169,9 +175,14 @@ export class ApiClient {
         }
       );
       const chunk = new Uint8Array(response.arrayBuffer);
+      const expectedSize = end - start + 1;
+      if (chunk.byteLength !== expectedSize) {
+        throw new Error(`Chunked download failed for ${path}: expected ${expectedSize} bytes, got ${chunk.byteLength}.`);
+      }
       chunks.push(chunk);
       total += chunk.byteLength;
     }
+    if (total !== size) throw new Error(`Chunked download failed for ${path}: expected ${size} bytes, got ${total}.`);
     const merged = new Uint8Array(total);
     let offset = 0;
     for (const chunk of chunks) {

@@ -14,9 +14,10 @@ import {
   writeLocalBinary
 } from "./localFiles";
 import type { LocalIndexStore } from "./localIndex";
-import { encryptedPlaceholderInfo, encryptedPlaceholderText, isEncryptedNoteBody, isEncryptedPlaceholder, isMarkedForServerEncryption } from "./noteEncryption";
+import { encryptedPlaceholderInfo, encryptedPlaceholderText, isEncryptedPlaceholder, isMarkedForServerEncryption } from "./noteEncryption";
 import type PrivateSyncPlugin from "./plugin";
 import { collectCommunityPluginIds, getCommunityPluginId, shouldSyncPath } from "./settingsSyncPolicy";
+import { canAutoResolveCreateConflict } from "./syncConflictPolicy";
 import type { LocalFileRecord, PendingOperation, ServerChange } from "./types";
 import { openVaultConnectionModal } from "./vaultConnectionModal";
 import { buildLocalVaultManifest } from "./vaultManifest";
@@ -443,6 +444,17 @@ export class SyncEngine {
       const stat = await getLocalFileStat(this.plugin, operation.path);
       if (!stat) continue;
       const content = await readLocalBinary(this.plugin, operation.path);
+      const stableStat = await getLocalFileStat(this.plugin, operation.path);
+      if (!stableStat || stableStat.size !== stat.size || stableStat.mtime !== stat.mtime) {
+        const record = index.files[operation.path];
+        if (record) record.status = "pending_upload";
+        await this.plugin.recordSyncEvent({
+          type: "error",
+          path: operation.path,
+          message: `Skipped upload for ${operation.path}: file changed while it was being read.`
+        });
+        continue;
+      }
       const plaintextHash = await sha256(content);
       const shouldEncrypt = this.shouldEncryptUpload(operation.path, content);
       if (shouldEncrypt && !this.plugin.isEncryptionUnlocked()) {
@@ -498,10 +510,17 @@ export class SyncEngine {
     }
     const result = await this.api.commit(this.plugin.settings.vaultId, batchId);
     if (result.status === "committed" && result.revision !== undefined) {
+      const committedRevisions = new Map(result.fileRevisions?.map((entry) => [entry.path, entry.fileRevisionId]) ?? []);
       for (const operation of batchOperations) {
         const record = index.files[operation.path];
         if (record) {
-          record.serverRevisionId = result.revision;
+          const committedPath = operation.path;
+          let fileRevisionId = committedRevisions.get(committedPath);
+          if (fileRevisionId == null) {
+            const history = await this.api.history(this.plugin.settings.vaultId, committedPath);
+            fileRevisionId = history.history[0]?.id ?? null;
+          }
+          record.serverRevisionId = fileRevisionId;
           record.status = "synced";
           record.wasSynced = true;
           if (operation.type === "delete") {
@@ -1200,14 +1219,48 @@ export class SyncEngine {
     const current = history.history[0];
     if (!current || current.deleted) return false;
 
-    if (!operation.baseRevisionId) return false;
-
-    const baseRevision = history.history.find((entry) => entry.id === operation.baseRevisionId);
+    const baseRevision = operation.baseRevisionId === null
+      ? undefined
+      : history.history.find((entry) => entry.id === operation.baseRevisionId);
     const [serverContent, localContent, baseContent] = await Promise.all([
       this.decryptRemoteContent(current, await this.api.download(this.plugin.settings.vaultId, operation.path)),
       readLocalBinary(this.plugin, operation.path),
       baseRevision ? this.downloadRevisionPlain(baseRevision).catch(() => null) : Promise.resolve(null)
     ]);
+    if (canAutoResolveCreateConflict(operation, localContent, serverContent)) {
+      const localHash = await sha256(localContent);
+      await this.indexStore.removePathFromQueue(operation.path);
+      index.files[operation.path] = {
+        path: operation.path,
+        localHash,
+        size: localContent.byteLength,
+        mtime: file.stat.mtime,
+        serverRevisionId: current.id,
+        status: "synced",
+        wasSynced: true
+      };
+      await this.resolveRemoteConflicts(operation.path, "resolved", {
+        strategy: "auto_create_already_exists",
+        serverRevisionId: current.id
+      });
+      await this.plugin.recordSyncEvent({
+        type: "auto_merge",
+        path: operation.path,
+        message: `Resolved identical create conflict in ${operation.path}`,
+        details: {
+          strategy: "auto_create_already_exists",
+          serverRevisionId: current.id
+        }
+      });
+      this.plugin.showAggregatedNotice(
+        "conflicts-resolved",
+        `Private Sync: matched existing server note for ${operation.path}.`,
+        (count) => `Private Sync: ${count} conflicts resolved.`,
+        10000
+      );
+      await this.reconcileResolvedLocalConflict(operation.path);
+      return true;
+    }
     if (!baseContent) return false;
 
     const serverText = decodeUtf8(serverContent);
@@ -1511,7 +1564,7 @@ function isMarkdownPath(path: string): boolean {
 }
 
 function isLocalEncryptedMarkdownText(text: string): boolean {
-  return isEncryptedNoteBody(text) || isEncryptedPayload(text.trim());
+  return isEncryptedPayload(text.trim());
 }
 
 function mergeTextThreeWay(baseText: string, localText: string, remoteText: string): ThreeWayMergeResult | null {
