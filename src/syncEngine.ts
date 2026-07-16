@@ -17,6 +17,7 @@ import type { LocalIndexStore } from "./localIndex";
 import { encryptedPlaceholderInfo, encryptedPlaceholderText, isEncryptedPlaceholder, isMarkedForServerEncryption } from "./noteEncryption";
 import type PrivateSyncPlugin from "./plugin";
 import { collectCommunityPluginIds, getCommunityPluginId, shouldSyncPath } from "./settingsSyncPolicy";
+import { canAutoResolveCreateConflict } from "./syncConflictPolicy";
 import type { LocalFileRecord, PendingOperation, ServerChange } from "./types";
 import { openVaultConnectionModal } from "./vaultConnectionModal";
 import { buildLocalVaultManifest } from "./vaultManifest";
@@ -515,7 +516,7 @@ export class SyncEngine {
         if (record) {
           const committedPath = operation.path;
           let fileRevisionId = committedRevisions.get(committedPath);
-          if (fileRevisionId === undefined) {
+          if (fileRevisionId == null) {
             const history = await this.api.history(this.plugin.settings.vaultId, committedPath);
             fileRevisionId = history.history[0]?.id ?? null;
           }
@@ -1218,14 +1219,48 @@ export class SyncEngine {
     const current = history.history[0];
     if (!current || current.deleted) return false;
 
-    if (!operation.baseRevisionId) return false;
-
-    const baseRevision = history.history.find((entry) => entry.id === operation.baseRevisionId);
+    const baseRevision = operation.baseRevisionId === null
+      ? undefined
+      : history.history.find((entry) => entry.id === operation.baseRevisionId);
     const [serverContent, localContent, baseContent] = await Promise.all([
       this.decryptRemoteContent(current, await this.api.download(this.plugin.settings.vaultId, operation.path)),
       readLocalBinary(this.plugin, operation.path),
       baseRevision ? this.downloadRevisionPlain(baseRevision).catch(() => null) : Promise.resolve(null)
     ]);
+    if (canAutoResolveCreateConflict(operation, localContent, serverContent)) {
+      const localHash = await sha256(localContent);
+      await this.indexStore.removePathFromQueue(operation.path);
+      index.files[operation.path] = {
+        path: operation.path,
+        localHash,
+        size: localContent.byteLength,
+        mtime: file.stat.mtime,
+        serverRevisionId: current.id,
+        status: "synced",
+        wasSynced: true
+      };
+      await this.resolveRemoteConflicts(operation.path, "resolved", {
+        strategy: "auto_create_already_exists",
+        serverRevisionId: current.id
+      });
+      await this.plugin.recordSyncEvent({
+        type: "auto_merge",
+        path: operation.path,
+        message: `Resolved identical create conflict in ${operation.path}`,
+        details: {
+          strategy: "auto_create_already_exists",
+          serverRevisionId: current.id
+        }
+      });
+      this.plugin.showAggregatedNotice(
+        "conflicts-resolved",
+        `Private Sync: matched existing server note for ${operation.path}.`,
+        (count) => `Private Sync: ${count} conflicts resolved.`,
+        10000
+      );
+      await this.reconcileResolvedLocalConflict(operation.path);
+      return true;
+    }
     if (!baseContent) return false;
 
     const serverText = decodeUtf8(serverContent);
