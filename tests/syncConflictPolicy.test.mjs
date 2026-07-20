@@ -19,53 +19,17 @@ await build({
   logLevel: "silent"
 });
 
-const { canAutoResolveCreateConflict, shouldPreferServerForEmptyCreate } = await import(pathToFileURL(bundledHelpers).href);
-const encode = (value) => new TextEncoder().encode(value).buffer;
+const { shouldPreferServerForCreateCollision } = await import(pathToFileURL(bundledHelpers).href);
 
 test.after(async () => {
   await rm(tempDir, { recursive: true, force: true });
 });
 
-test("identical create without a base revision can be resolved automatically", () => {
-  assert.equal(
-    canAutoResolveCreateConflict({ type: "create", baseRevisionId: null }, encode("same content"), encode("same content")),
-    true
-  );
+test("local create without a base revision prefers the existing server note", () => {
+  assert.equal(shouldPreferServerForCreateCollision({ type: "create", baseRevisionId: null }), true);
 });
 
-test("create without a base revision stays conflicted when content differs", () => {
-  assert.equal(
-    canAutoResolveCreateConflict({ type: "create", baseRevisionId: null }, encode("local"), encode("server")),
-    false
-  );
-});
-
-test("empty local create prefers an existing non-empty server note", () => {
-  assert.equal(
-    shouldPreferServerForEmptyCreate({ type: "create", baseRevisionId: null }, encode(""), encode("server content")),
-    true
-  );
-  assert.equal(
-    shouldPreferServerForEmptyCreate({ type: "create", baseRevisionId: null }, encode("\n  \t"), encode("server content")),
-    true
-  );
-});
-
-test("server is not preferred for a non-empty local create or an empty server note", () => {
-  assert.equal(
-    shouldPreferServerForEmptyCreate({ type: "create", baseRevisionId: null }, encode("local content"), encode("server content")),
-    false
-  );
-  assert.equal(
-    shouldPreferServerForEmptyCreate({ type: "create", baseRevisionId: null }, encode(""), encode("")),
-    false
-  );
-});
-
-test("updates and operations with a base revision still use three-way merge", () => {
-  const content = encode("same content");
-  assert.equal(canAutoResolveCreateConflict({ type: "update", baseRevisionId: null }, content, content), false);
-  assert.equal(canAutoResolveCreateConflict({ type: "create", baseRevisionId: 42 }, content, content), false);
-  assert.equal(shouldPreferServerForEmptyCreate({ type: "update", baseRevisionId: null }, encode(""), content), false);
-  assert.equal(shouldPreferServerForEmptyCreate({ type: "create", baseRevisionId: 42 }, encode(""), content), false);
+test("updates and creates with a base revision do not use server-first collision handling", () => {
+  assert.equal(shouldPreferServerForCreateCollision({ type: "update", baseRevisionId: null }), false);
+  assert.equal(shouldPreferServerForCreateCollision({ type: "create", baseRevisionId: 42 }), false);
 });

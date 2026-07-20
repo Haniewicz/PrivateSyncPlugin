@@ -17,7 +17,7 @@ import type { LocalIndexStore } from "./localIndex";
 import { encryptedPlaceholderInfo, encryptedPlaceholderText, isEncryptedPlaceholder, isMarkedForServerEncryption } from "./noteEncryption";
 import type PrivateSyncPlugin from "./plugin";
 import { collectCommunityPluginIds, getCommunityPluginId, shouldSyncPath } from "./settingsSyncPolicy";
-import { canAutoResolveCreateConflict, shouldPreferServerForEmptyCreate } from "./syncConflictPolicy";
+import { shouldPreferServerForCreateCollision } from "./syncConflictPolicy";
 import type { LocalFileRecord, PendingOperation, ServerChange } from "./types";
 import { openVaultConnectionModal } from "./vaultConnectionModal";
 import { buildLocalVaultManifest } from "./vaultManifest";
@@ -952,12 +952,12 @@ export class SyncEngine {
 
     const pendingCreate = index.queue.find((operation) => operation.path === change.path && operation.type === "create" && operation.baseRevisionId === null);
     if (pendingCreate && record.serverRevisionId === null) {
-      const [localContent, remoteContent] = await Promise.all([
-        readLocalBinary(this.plugin, change.path),
-        this.decryptRemoteContent(change, await this.api.downloadRevision(this.plugin.settings.vaultId, change.fileRevisionId))
-      ]);
-      if (shouldPreferServerForEmptyCreate(pendingCreate, localContent, remoteContent)) {
-        await this.applyServerVersionForEmptyCreate(change.path, change.fileRevisionId, change, remoteContent, stat.mtime);
+      const remoteContent = await this.decryptRemoteContent(
+        change,
+        await this.api.downloadRevision(this.plugin.settings.vaultId, change.fileRevisionId)
+      );
+      if (shouldPreferServerForCreateCollision(pendingCreate)) {
+        await this.applyServerVersionForCreateCollision(change.path, change.fileRevisionId, change, remoteContent, stat.mtime);
         return "applied";
       }
     }
@@ -1028,7 +1028,7 @@ export class SyncEngine {
     return "queued_upload";
   }
 
-  private async applyServerVersionForEmptyCreate(
+  private async applyServerVersionForCreateCollision(
     path: string,
     serverRevisionId: number,
     revision: { contentHash: string | null; size: number; encrypted: number | boolean; plaintextHash?: string | null; plaintextSize?: number | null },
@@ -1048,22 +1048,22 @@ export class SyncEngine {
       wasSynced: true
     };
     await this.resolveRemoteConflicts(path, "resolved", {
-      strategy: "server_over_empty_create",
+      strategy: "server_over_create_collision",
       serverRevisionId
     });
     await this.plugin.recordSyncEvent({
       type: "auto_merge",
       path,
-      message: `Used the server version for an empty local note in ${path}`,
+      message: `Used the existing server version for a local create collision in ${path}`,
       details: {
-        strategy: "server_over_empty_create",
+        strategy: "server_over_create_collision",
         serverRevisionId
       }
     });
     this.plugin.showAggregatedNotice(
       "conflicts-resolved",
-      `Private Sync: restored ${path} from the server because the local note was empty.`,
-      (count) => `Private Sync: ${count} empty local notes restored from the server.`,
+      `Private Sync: restored the existing server note for ${path}.`,
+      (count) => `Private Sync: ${count} existing server notes restored.`,
       10000
     );
   }
@@ -1285,42 +1285,8 @@ export class SyncEngine {
       readLocalBinary(this.plugin, operation.path),
       baseRevision ? this.downloadRevisionPlain(baseRevision).catch(() => null) : Promise.resolve(null)
     ]);
-    if (shouldPreferServerForEmptyCreate(operation, localContent, serverContent)) {
-      await this.applyServerVersionForEmptyCreate(operation.path, current.id, current, serverContent, file.stat.mtime);
-      await this.reconcileResolvedLocalConflict(operation.path);
-      return true;
-    }
-    if (canAutoResolveCreateConflict(operation, localContent, serverContent)) {
-      const localHash = await sha256(localContent);
-      await this.indexStore.removePathFromQueue(operation.path);
-      index.files[operation.path] = {
-        path: operation.path,
-        localHash,
-        size: localContent.byteLength,
-        mtime: file.stat.mtime,
-        serverRevisionId: current.id,
-        status: "synced",
-        wasSynced: true
-      };
-      await this.resolveRemoteConflicts(operation.path, "resolved", {
-        strategy: "auto_create_already_exists",
-        serverRevisionId: current.id
-      });
-      await this.plugin.recordSyncEvent({
-        type: "auto_merge",
-        path: operation.path,
-        message: `Resolved identical create conflict in ${operation.path}`,
-        details: {
-          strategy: "auto_create_already_exists",
-          serverRevisionId: current.id
-        }
-      });
-      this.plugin.showAggregatedNotice(
-        "conflicts-resolved",
-        `Private Sync: matched existing server note for ${operation.path}.`,
-        (count) => `Private Sync: ${count} conflicts resolved.`,
-        10000
-      );
+    if (shouldPreferServerForCreateCollision(operation)) {
+      await this.applyServerVersionForCreateCollision(operation.path, current.id, current, serverContent, file.stat.mtime);
       await this.reconcileResolvedLocalConflict(operation.path);
       return true;
     }
