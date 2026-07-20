@@ -19,7 +19,7 @@ await build({
   logLevel: "silent"
 });
 
-const { canAutoResolveCreateConflict } = await import(pathToFileURL(bundledHelpers).href);
+const { canAutoResolveCreateConflict, shouldPreferServerForEmptyCreate } = await import(pathToFileURL(bundledHelpers).href);
 const encode = (value) => new TextEncoder().encode(value).buffer;
 
 test.after(async () => {
@@ -40,8 +40,32 @@ test("create without a base revision stays conflicted when content differs", () 
   );
 });
 
+test("empty local create prefers an existing non-empty server note", () => {
+  assert.equal(
+    shouldPreferServerForEmptyCreate({ type: "create", baseRevisionId: null }, encode(""), encode("server content")),
+    true
+  );
+  assert.equal(
+    shouldPreferServerForEmptyCreate({ type: "create", baseRevisionId: null }, encode("\n  \t"), encode("server content")),
+    true
+  );
+});
+
+test("server is not preferred for a non-empty local create or an empty server note", () => {
+  assert.equal(
+    shouldPreferServerForEmptyCreate({ type: "create", baseRevisionId: null }, encode("local content"), encode("server content")),
+    false
+  );
+  assert.equal(
+    shouldPreferServerForEmptyCreate({ type: "create", baseRevisionId: null }, encode(""), encode("")),
+    false
+  );
+});
+
 test("updates and operations with a base revision still use three-way merge", () => {
   const content = encode("same content");
   assert.equal(canAutoResolveCreateConflict({ type: "update", baseRevisionId: null }, content, content), false);
   assert.equal(canAutoResolveCreateConflict({ type: "create", baseRevisionId: 42 }, content, content), false);
+  assert.equal(shouldPreferServerForEmptyCreate({ type: "update", baseRevisionId: null }, encode(""), content), false);
+  assert.equal(shouldPreferServerForEmptyCreate({ type: "create", baseRevisionId: 42 }, encode(""), content), false);
 });

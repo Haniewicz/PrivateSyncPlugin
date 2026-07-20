@@ -15,3 +15,16 @@ export function canAutoResolveCreateConflict(
   }
   return true;
 }
+
+export function shouldPreferServerForEmptyCreate(
+  operation: Pick<PendingOperation, "type" | "baseRevisionId">,
+  localContent: ArrayBuffer,
+  serverContent: ArrayBuffer
+): boolean {
+  if (operation.type !== "create" || operation.baseRevisionId !== null) return false;
+  return isBlankText(localContent) && !isBlankText(serverContent);
+}
+
+function isBlankText(content: ArrayBuffer): boolean {
+  return new TextDecoder().decode(content).trim().length === 0;
+}
