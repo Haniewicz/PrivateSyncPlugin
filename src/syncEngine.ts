@@ -44,6 +44,8 @@ type ConflictResolutionOptions = {
   notify?: boolean;
 };
 
+type CommitResult = Awaited<ReturnType<ApiClient["commit"]>>;
+
 export class SyncEngine {
   private running = false;
   private runAgain = false;
@@ -98,6 +100,7 @@ export class SyncEngine {
     try {
       do {
         this.runAgain = false;
+        await this.reconcileUploadedBatches();
         await this.scanLocalChanges();
         await this.pushQueue();
         await this.pullChanges();
@@ -492,8 +495,11 @@ export class SyncEngine {
       await this.indexStore.save();
       return;
     }
+    for (const operation of batchOperations) operation.batchId = undefined;
     await this.indexStore.save();
     const { batchId } = await this.api.createBatch(this.plugin.settings.vaultId, batchOperations);
+    for (const operation of batchOperations) operation.batchId = batchId;
+    await this.indexStore.save();
     for (const operation of batchOperations) {
       if (operation.type === "delete") continue;
       const content = uploadPayloads.get(operation.clientChangeId);
@@ -508,7 +514,35 @@ export class SyncEngine {
       }
       if (record) record.status = "uploaded_waiting_ack";
     }
+    await this.indexStore.save();
     const result = await this.api.commit(this.plugin.settings.vaultId, batchId);
+    const shouldContinue = await this.handleCommitResult(result, batchOperations);
+    if (shouldContinue) await this.pushQueue();
+  }
+
+  private async reconcileUploadedBatches(): Promise<void> {
+    const index = this.indexStore.get();
+    const batches = new Map<string, PendingOperation[]>();
+    for (const operation of index.queue) {
+      if (!operation.batchId) continue;
+      const operations = batches.get(operation.batchId) ?? [];
+      operations.push(operation);
+      batches.set(operation.batchId, operations);
+    }
+
+    for (const [batchId, operations] of batches) {
+      const fullyUploaded = operations.every((operation) => {
+        if (operation.type === "delete") return true;
+        return index.files[operation.path]?.status === "uploaded_waiting_ack";
+      });
+      if (!fullyUploaded) continue;
+      const result = await this.api.commit(this.plugin.settings.vaultId, batchId);
+      await this.handleCommitResult(result, operations);
+    }
+  }
+
+  private async handleCommitResult(result: CommitResult, batchOperations: PendingOperation[]): Promise<boolean> {
+    const index = this.indexStore.get();
     if (result.status === "committed" && result.revision !== undefined) {
       const committedRevisions = new Map(result.fileRevisions?.map((entry) => [entry.path, entry.fileRevisionId]) ?? []);
       for (const operation of batchOperations) {
@@ -531,12 +565,32 @@ export class SyncEngine {
         }
       }
       await this.indexStore.removeFromQueue(batchOperations.map((operation) => operation.clientChangeId));
+      return false;
     } else if (result.status === "conflict") {
-      const autoMergedIds = await this.tryAutoMergeConflicts(batchOperations);
+      const conflictIds = new Set(result.conflicts ?? []);
+      const pendingConflicts = await this.api.conflicts(this.plugin.settings.vaultId);
+      const conflictingClientChangeIds = new Set(
+        pendingConflicts.conflicts
+          .filter((conflict) => conflictIds.has(conflict.id))
+          .map((conflict) => conflict.incomingClientChangeId)
+      );
+      const conflictOperations = conflictingClientChangeIds.size > 0
+        ? batchOperations.filter((operation) => conflictingClientChangeIds.has(operation.clientChangeId))
+        : batchOperations;
+      const conflictOperationIds = new Set(conflictOperations.map((operation) => operation.clientChangeId));
       for (const operation of batchOperations) {
+        operation.batchId = undefined;
+        if (conflictOperationIds.has(operation.clientChangeId)) continue;
+        const record = index.files[operation.path];
+        if (record) record.status = operation.type === "delete" ? "deleted_local" : "pending_upload";
+      }
+      const autoMergedIds = await this.tryAutoMergeConflicts(conflictOperations);
+      let unresolvedCount = 0;
+      for (const operation of conflictOperations) {
         if (autoMergedIds.has(operation.clientChangeId)) continue;
         const record = index.files[operation.path];
         if (record) {
+          unresolvedCount += 1;
           record.status = "conflict";
           await this.plugin.recordSyncEvent({
             type: "conflict",
@@ -547,10 +601,8 @@ export class SyncEngine {
         }
       }
       await this.indexStore.save();
-      if (autoMergedIds.size > 0) {
-        await this.pushQueue();
-      }
-      if (autoMergedIds.size < batchOperations.length) new Notice("Private Sync: conflict detected.");
+      if (unresolvedCount > 0) new Notice("Private Sync: conflict detected.");
+      return autoMergedIds.size > 0 || conflictOperations.length < batchOperations.length;
     } else if (result.status === "waiting_for_decision") {
       for (const operation of batchOperations) {
         const record = index.files[operation.path];
@@ -563,7 +615,9 @@ export class SyncEngine {
         details: { requestId: result.requestId }
       });
       new Notice("Private Sync: server requires a decision.");
+      return false;
     }
+    return false;
   }
 
   async pullChanges(): Promise<void> {
@@ -956,7 +1010,8 @@ export class SyncEngine {
         change,
         await this.api.downloadRevision(this.plugin.settings.vaultId, change.fileRevisionId)
       );
-      if (shouldPreferServerForCreateCollision(pendingCreate)) {
+      const currentLocalHash = await sha256(await readLocalBinary(this.plugin, change.path));
+      if (shouldPreferServerForCreateCollision(pendingCreate, currentLocalHash)) {
         await this.applyServerVersionForCreateCollision(change.path, change.fileRevisionId, change, remoteContent, stat.mtime);
         return "applied";
       }
@@ -1285,7 +1340,8 @@ export class SyncEngine {
       readLocalBinary(this.plugin, operation.path),
       baseRevision ? this.downloadRevisionPlain(baseRevision).catch(() => null) : Promise.resolve(null)
     ]);
-    if (shouldPreferServerForCreateCollision(operation)) {
+    const currentLocalHash = await sha256(localContent);
+    if (shouldPreferServerForCreateCollision(operation, currentLocalHash)) {
       await this.applyServerVersionForCreateCollision(operation.path, current.id, current, serverContent, file.stat.mtime);
       await this.reconcileResolvedLocalConflict(operation.path);
       return true;

@@ -25,11 +25,25 @@ test.after(async () => {
   await rm(tempDir, { recursive: true, force: true });
 });
 
-test("local create without a base revision prefers the existing server note", () => {
-  assert.equal(shouldPreferServerForCreateCollision({ type: "create", baseRevisionId: null }), true);
+test("unchanged local create without a base revision prefers the acknowledged server note", () => {
+  assert.equal(
+    shouldPreferServerForCreateCollision({ type: "create", baseRevisionId: null, contentHash: "uploaded" }, "uploaded"),
+    true
+  );
 });
 
-test("updates and creates with a base revision do not use server-first collision handling", () => {
-  assert.equal(shouldPreferServerForCreateCollision({ type: "update", baseRevisionId: null }), false);
-  assert.equal(shouldPreferServerForCreateCollision({ type: "create", baseRevisionId: 42 }), false);
+test("changed local creates, updates, and creates with a base revision preserve local content", () => {
+  assert.equal(shouldPreferServerForCreateCollision({ type: "create", baseRevisionId: null, contentHash: "uploaded" }, "newer"), false);
+  assert.equal(shouldPreferServerForCreateCollision({ type: "update", baseRevisionId: null, contentHash: "same" }, "same"), false);
+  assert.equal(shouldPreferServerForCreateCollision({ type: "create", baseRevisionId: 42, contentHash: "same" }, "same"), false);
+});
+
+test("encrypted creates compare the local content with the uploaded plaintext hash", () => {
+  assert.equal(
+    shouldPreferServerForCreateCollision(
+      { type: "create", baseRevisionId: null, contentHash: "ciphertext", plaintextHash: "plaintext" },
+      "plaintext"
+    ),
+    true
+  );
 });

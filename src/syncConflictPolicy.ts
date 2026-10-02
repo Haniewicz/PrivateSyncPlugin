@@ -1,7 +1,9 @@
 import type { PendingOperation } from "./types";
 
 export function shouldPreferServerForCreateCollision(
-  operation: Pick<PendingOperation, "type" | "baseRevisionId">
+  operation: Pick<PendingOperation, "type" | "baseRevisionId" | "contentHash" | "plaintextHash">,
+  currentLocalHash: string
 ): boolean {
-  return operation.type === "create" && operation.baseRevisionId === null;
+  const uploadedPlaintextHash = operation.plaintextHash ?? operation.contentHash;
+  return operation.type === "create" && operation.baseRevisionId === null && uploadedPlaintextHash === currentLocalHash;
 }

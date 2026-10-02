@@ -27,6 +27,7 @@ export type LocalFileRecord = {
 
 export type PendingOperation = {
   clientChangeId: string;
+  batchId?: string;
   type: OperationType;
   path: string;
   baseRevisionId: number | null;
